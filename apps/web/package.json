@@ -13,6 +13,13 @@
   "dependencies": {
     "@babel/runtime": "^8.0.0",
     "@tailwindcss/node": "^4.3.2",
+    "@tugpt/ai-providers": "workspace:*",
+    "@tugpt/auth": "workspace:*",
+    "@tugpt/database": "workspace:*",
+    "@tugpt/feature-flags": "workspace:*",
+    "@tugpt/jobs": "workspace:*",
+    "@tugpt/observability": "workspace:*",
+    "@tugpt/security": "workspace:*",
     "next": "^16.2.10",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
