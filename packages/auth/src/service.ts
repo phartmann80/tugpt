@@ -157,4 +157,26 @@ export class AuthService {
         role: m.role,
       }));
   }
+
+  /**
+   * Resolve and validate server-side active tenant context for user.
+   * If requestedTenantId is supplied, verifies user is a valid active member of that tenant.
+   * If not supplied, defaults to user's first active organization.
+   * Returns null if user has no access to requested tenant.
+   */
+  async resolveTenantContext(
+    userId: string,
+    requestedTenantId?: string | null
+  ): Promise<TenantContext | null> {
+    const orgs = await this.getUserOrganizations(userId);
+    if (orgs.length === 0) return null;
+
+    if (requestedTenantId) {
+      const match = orgs.find((o) => o.organizationId === requestedTenantId);
+      return match || null;
+    }
+
+    return orgs[0];
+  }
 }
+

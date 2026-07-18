@@ -3,30 +3,36 @@ project_id = "tugpt-ai"
 
 [api]
 enabled = true
-port = 54321
+port = 56321
 schemas = ["public", "storage", "graphql_public"]
 extra_search_path = ["public", "extensions"]
 max_rows = 1000
 
 [db]
-port = 54322
-shadow_port = 54320
+port = 56322
+shadow_port = 56320
 major_version = 15
 
 [db.pooler]
 enabled = false
 
 [studio]
-enabled = true
-port = 54323
+enabled = false
+port = 56323
 
-[inbucket]
+[local_smtp]
 enabled = true
-port = 54324
+port = 56324
+
+
+[analytics]
+enabled = false
+port = 56327
 
 [storage]
-enabled = true
+enabled = false
 file_size_limit = "50MiB"
+
 
 [auth]
 enabled = true
@@ -44,4 +50,4 @@ enable_confirmations = true
 enabled = true
 client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"
 secret = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET)"
-redirect_uri = "http://localhost:54321/auth/v1/callback"
+redirect_uri = "http://localhost:56321/auth/v1/callback"
