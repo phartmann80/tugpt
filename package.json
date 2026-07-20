@@ -10,6 +10,7 @@
     "typecheck": "turbo typecheck"
   },
   "devDependencies": {
+    "supabase": "^2.109.1",
     "turbo": "latest",
     "typescript": "^5.4.5"
   }

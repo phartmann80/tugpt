@@ -36,7 +36,7 @@ export interface OrganizationInvitation {
   organization_id: string;
   email: string;
   role: OrganizationRole;
-  token: string;
+  token_hash: string;
   status: InvitationStatus;
   invited_by: string;
   expires_at: string;
@@ -98,6 +98,23 @@ export interface Database {
         Insert: Omit<FeatureFlag, 'id' | 'created_at' | 'updated_at'> & { id?: string; created_at?: string; updated_at?: string };
         Update: Partial<FeatureFlag>;
       };
+    };
+    Views: {
+      [_ in never]: never;
+    };
+    Functions: {
+      create_organization_with_owner: {
+        Args: {
+          p_name: string;
+          p_slug: string;
+          p_owner_id: string;
+        };
+        Returns: string;
+      };
+    };
+    Enums: {
+      organization_role: OrganizationRole;
+      invitation_status: InvitationStatus;
     };
   };
 }

@@ -1,0 +1,218 @@
+-- TuGPT.ai pgTAP Invitations and Organization Ownership Test Suite
+-- Runs inside a single transaction that is rolled back at the end.
+
+BEGIN;
+SELECT plan(10);
+
+-- =============================================================================
+-- SETUP: Seed test database records (bypassing RLS as postgres user)
+-- =============================================================================
+
+-- Seed Users in auth.users
+INSERT INTO auth.users (id, email, raw_user_meta_data) VALUES
+  ('11111111-1111-1111-1111-111111111111', 'owner_a@tugpt.ai', '{"full_name": "Owner A"}'),
+  ('22222222-2222-2222-2222-222222222222', 'admin_b@tugpt.ai', '{"full_name": "Admin B"}'),
+  ('33333333-3333-3333-3333-333333333333', 'invitee_c@tugpt.ai', '{"full_name": "Invitee C"}')
+ON CONFLICT (id) DO NOTHING;
+
+-- Seed Profiles
+INSERT INTO public.profiles (id, email, full_name) VALUES
+  ('11111111-1111-1111-1111-111111111111', 'owner_a@tugpt.ai', 'Owner A'),
+  ('22222222-2222-2222-2222-222222222222', 'admin_b@tugpt.ai', 'Admin B'),
+  ('33333333-3333-3333-3333-333333333333', 'invitee_c@tugpt.ai', 'Invitee C')
+ON CONFLICT (id) DO NOTHING;
+
+-- Seed Organizations
+INSERT INTO public.organizations (id, name, slug) VALUES
+  ('d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1', 'Acme Hardening Corp', 'acme-hardening')
+ON CONFLICT (id) DO NOTHING;
+
+-- Seed Memberships
+INSERT INTO public.organization_members (organization_id, user_id, role) VALUES
+  ('d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1', '11111111-1111-1111-1111-111111111111', 'owner'),
+  ('d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1', '22222222-2222-2222-2222-222222222222', 'admin')
+ON CONFLICT (organization_id, user_id) DO NOTHING;
+
+
+-- =============================================================================
+-- TEST 1: Wrong email rejection
+-- =============================================================================
+-- Seed an invitation for wrong_user@tugpt.ai
+INSERT INTO public.organization_invitations (id, organization_id, email, role, token_hash, invited_by, expires_at)
+VALUES (
+  'e1e1e1e1-e1e1-e1e1-e1e1-e1e1e1e1e1e1',
+  'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1',
+  'wrong_user@tugpt.ai',
+  'agent',
+  'tok_wrong_email_123',
+  '11111111-1111-1111-1111-111111111111',
+  NOW() + INTERVAL '1 day'
+);
+
+-- Try to accept with token as User C ('invitee_c@tugpt.ai')
+SELECT set_config('request.jwt.claims', '{"sub":"33333333-3333-3333-3333-333333333333","role":"authenticated"}', true);
+SET LOCAL ROLE authenticated;
+
+SELECT throws_ok(
+  $$SELECT public.accept_invitation('tok_wrong_email_123', '33333333-3333-3333-3333-333333333333')$$,
+  'P0001',
+  'Invitation email identity mismatch',
+  'Test 1: Rejects accepting an invitation where email identity does not match'
+);
+
+
+-- =============================================================================
+-- TEST 2: Expired invitation rejection
+-- =============================================================================
+SET LOCAL ROLE postgres;
+INSERT INTO public.organization_invitations (id, organization_id, email, role, token_hash, invited_by, expires_at)
+VALUES (
+  'e2e2e2e2-e2e2-e2e2-e2e2-e2e2e2e2e2e2',
+  'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1',
+  'invitee_c@tugpt.ai',
+  'agent',
+  'tok_expired_123',
+  '11111111-1111-1111-1111-111111111111',
+  NOW() - INTERVAL '1 hour'
+);
+
+SELECT set_config('request.jwt.claims', '{"sub":"33333333-3333-3333-3333-333333333333","role":"authenticated"}', true);
+SET LOCAL ROLE authenticated;
+
+SELECT throws_ok(
+  $$SELECT public.accept_invitation('tok_expired_123', '33333333-3333-3333-3333-333333333333')$$,
+  'P0001',
+  'Invitation token has expired',
+  'Test 2: Rejects accepting an expired invitation token'
+);
+
+
+-- =============================================================================
+-- TEST 3: Replay prevention (cannot accept twice)
+-- =============================================================================
+SET LOCAL ROLE postgres;
+INSERT INTO public.organization_invitations (id, organization_id, email, role, token_hash, invited_by, expires_at)
+VALUES (
+  'e3e3e3e3-e3e3-e3e3-e3e3-e3e3e3e3e3e3',
+  'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1',
+  'invitee_c@tugpt.ai',
+  'agent',
+  'tok_valid_123',
+  '11111111-1111-1111-1111-111111111111',
+  NOW() + INTERVAL '1 day'
+);
+
+-- Accept first time (should return true)
+SELECT set_config('request.jwt.claims', '{"sub":"33333333-3333-3333-3333-333333333333","role":"authenticated"}', true);
+SET LOCAL ROLE authenticated;
+
+SELECT is(
+  (SELECT public.accept_invitation('tok_valid_123', '33333333-3333-3333-3333-333333333333')),
+  true,
+  'Test 3a: Successfully accepts valid invitation'
+);
+
+-- Try to accept again (replay)
+SELECT throws_ok(
+  $$SELECT public.accept_invitation('tok_valid_123', '33333333-3333-3333-3333-333333333333')$$,
+  'P0001',
+  'Invitation is no longer pending',
+  'Test 3b: Blocks accepting the invitation a second time'
+);
+
+
+-- =============================================================================
+-- TEST 4: Organization Ownership transfer
+-- =============================================================================
+SET LOCAL ROLE postgres;
+
+-- Transfer ownership: assign owner role to User B (Admin B)
+UPDATE public.organization_members
+SET role = 'owner'
+WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1'
+  AND user_id = '22222222-2222-2222-2222-222222222222';
+
+SELECT is(
+  (SELECT role FROM public.organization_members WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1' AND user_id = '22222222-2222-2222-2222-222222222222'),
+  'owner'::organization_role,
+  'Test 4: Successfully transfers ownership role to another member'
+);
+
+
+-- =============================================================================
+-- TEST 5: Previous owner downgrade
+-- =============================================================================
+-- Downgrade User A (previous sole owner) to admin now that User B is owner
+UPDATE public.organization_members
+SET role = 'admin'
+WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1'
+  AND user_id = '11111111-1111-1111-1111-111111111111';
+
+SELECT is(
+  (SELECT role FROM public.organization_members WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1' AND user_id = '11111111-1111-1111-1111-111111111111'),
+  'admin'::organization_role,
+  'Test 5: Successfully downgrades previous owner after transfer'
+);
+
+
+-- =============================================================================
+-- TEST 6: Last owner protection
+-- =============================================================================
+-- Try to downgrade User B (currently the last and only owner of Acme Hardening Corp)
+SELECT throws_ok(
+  $$UPDATE public.organization_members SET role = 'admin' WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1' AND user_id = '22222222-2222-2222-2222-222222222222'$$,
+  'P0001',
+  'Action blocked: An organization must have at least one active owner',
+  'Test 6a: Last owner downgrade is blocked'
+);
+
+-- Try to delete User B (last owner) membership record
+SELECT throws_ok(
+  $$DELETE FROM public.organization_members WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1' AND user_id = '22222222-2222-2222-2222-222222222222'$$,
+  'P0001',
+  'Action blocked: An organization must have at least one active owner',
+  'Test 6b: Last owner deletion is blocked'
+);
+
+
+-- =============================================================================
+-- TEST 7: Transaction Rollback on Exception
+-- =============================================================================
+-- We start a block, insert a member, then do a trigger-violating action.
+-- The exception must abort and rollback all changes in the nested block.
+SET LOCAL ROLE postgres;
+
+-- We try to run a subtransaction via a DO block
+SELECT lives_ok(
+  $$DO $$$
+  BEGIN
+    -- This insert is valid
+    INSERT INTO public.organization_members (organization_id, user_id, role)
+    VALUES ('d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1', '33333333-3333-3333-3333-333333333333', 'agent');
+    
+    -- This triggers P0001 (aborts transaction block)
+    UPDATE public.organization_members
+    SET role = 'admin'
+    WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1'
+      AND user_id = '22222222-2222-2222-2222-222222222222';
+  EXCEPTION WHEN OTHERS THEN
+    -- Rollback / cancel block
+    NULL;
+  END;
+  $$$$,
+  'Test 7a: Traps exception inside nested query execution block'
+);
+
+-- Verify that the valid member was NOT added because the transaction block rolled back
+SELECT is(
+  (SELECT COUNT(*)::int FROM public.organization_members WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1' AND user_id = '33333333-3333-3333-3333-333333333333'),
+  0,
+  'Test 7b: Validates that aborted subtransaction changes are rolled back completely'
+);
+
+
+-- =============================================================================
+-- CLEANUP: rollback at end of file (handled by ROLLBACK at end of test run)
+-- =============================================================================
+
+ROLLBACK;

@@ -1,22 +1,68 @@
 import { NextResponse } from 'next/server';
 import { defaultLogger } from '@tugpt/observability';
+import { createServerClient } from '@tugpt/database';
+import { AuthService } from '@tugpt/auth';
 
 export async function GET(request: Request) {
   const requestId = request.headers.get('x-request-id') || `req-${Date.now()}`;
-  
-  defaultLogger.info('Organizations list requested', { requestId, action: 'list_organizations' });
+  const rawTenantId = request.headers.get('x-tenant-id');
 
-  return NextResponse.json({
-    organizations: [],
-    total: 0,
-    timestamp: new Date().toISOString(),
-  });
+  try {
+    const supabase = createServerClient();
+    const authService = new AuthService(supabase);
+    const user = await authService.getCurrentUser();
+
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Unauthenticated' },
+        { status: 401 }
+      );
+    }
+
+    // Server-side validation of active tenant
+    const activeTenant = await authService.resolveTenantContext(user.id, rawTenantId);
+    if (rawTenantId && (!activeTenant || activeTenant.organizationId !== rawTenantId)) {
+      return NextResponse.json(
+        { error: 'Access denied to requested tenant' },
+        { status: 403 }
+      );
+    }
+
+    const orgs = await authService.getUserOrganizations(user.id);
+
+    defaultLogger.info('Organizations list retrieved', {
+      requestId,
+      userId: user.id,
+      count: orgs.length,
+    });
+
+    return NextResponse.json({
+      organizations: orgs,
+      activeTenant,
+      total: orgs.length,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    defaultLogger.error('Organizations list failed', err as Error, { requestId });
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  }
 }
 
 export async function POST(request: Request) {
   const requestId = request.headers.get('x-request-id') || `req-${Date.now()}`;
 
   try {
+    const supabase = createServerClient();
+    const authService = new AuthService(supabase);
+    const user = await authService.getCurrentUser();
+
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Unauthenticated' },
+        { status: 401 }
+      );
+    }
+
     const body = (await request.json()) as { name?: string; slug?: string };
 
     if (!body.name || !body.slug) {
@@ -26,20 +72,34 @@ export async function POST(request: Request) {
       );
     }
 
-    defaultLogger.info('Organization creation requested', {
+    // Call public.create_organization_with_owner RPC
+    // Args cast to unknown until supabase gen types is run to generate Database types.
+    const { data: orgId, error: rpcError } = await supabase.rpc(
+      'create_organization_with_owner',
+      {
+        p_name: body.name,
+        p_slug: body.slug,
+        p_owner_id: user.id,
+      } as unknown as undefined
+    );
+
+    if (rpcError) {
+      defaultLogger.error('Failed atomic organization creation RPC', rpcError, { requestId });
+      return NextResponse.json({ error: 'Failed to create organization' }, { status: 400 });
+    }
+
+    defaultLogger.info('Organization created successfully', {
       requestId,
-      action: 'create_organization',
-      name: body.name,
-      slug: body.slug,
+      organizationId: orgId,
+      userId: user.id,
     });
 
     return NextResponse.json({
       success: true,
       organization: {
-        id: `org-${Date.now()}`,
+        id: orgId,
         name: body.name,
         slug: body.slug,
-        created_at: new Date().toISOString(),
       },
     });
   } catch (err) {

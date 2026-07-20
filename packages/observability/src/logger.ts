@@ -21,6 +21,51 @@ export interface StructuredLogMessage {
   };
 }
 
+const SENSITIVE_KEY_PATTERNS = [
+  /password/i,
+  /secret/i,
+  /token/i,
+  /authorization/i,
+  /api[-_]?key/i,
+  /cookie/i,
+  /private[-_]?key/i,
+  /service[-_]?role[-_]?key/i,
+  /credential/i,
+];
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(key));
+}
+
+export function sanitizeValue(key: string, value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+
+  if (typeof key === 'string' && isSensitiveKey(key)) {
+    return '[REDACTED]';
+  }
+
+  if (typeof value === 'string') {
+    let sanitized = value;
+    sanitized = sanitized.replace(/Bearer\s+[A-Za-z0-9-_=.]+/gi, 'Bearer [REDACTED]');
+    sanitized = sanitized.replace(/sk-[A-Za-z0-9_-]{20,}|sbp_[A-Za-z0-9_-]{20,}/gi, '[REDACTED]');
+    return sanitized;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((v) => sanitizeValue(key, v));
+  }
+
+  if (typeof value === 'object') {
+    const sanitizedObj: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      sanitizedObj[k] = sanitizeValue(k, v);
+    }
+    return sanitizedObj;
+  }
+
+  return value;
+}
+
 export class Logger {
   private defaultContext: LogContext;
 
@@ -29,11 +74,14 @@ export class Logger {
   }
 
   private log(level: LogLevel, message: string, context?: LogContext, err?: Error): void {
+    const rawContext = { ...this.defaultContext, ...context };
+    const sanitizedContext = sanitizeValue('root', rawContext) as LogContext;
+
     const payload: StructuredLogMessage = {
       timestamp: new Date().toISOString(),
       level,
       message,
-      context: { ...this.defaultContext, ...context },
+      context: sanitizedContext,
     };
 
     if (err) {

@@ -21,4 +21,6 @@ packages/**/.env.*.local
 
 *.log
 .DS_Store
-
+.agents/
+supabase/.temp/
+supabase/.branches/

@@ -8,6 +8,12 @@ export function createSupabaseClient(
   supabaseKey: string,
   options?: Parameters<typeof createClient>[2]
 ): TypedSupabaseClient {
+  if (!supabaseUrl) {
+    throw new Error('Supabase URL is required to create a client instance.');
+  }
+  if (!supabaseKey) {
+    throw new Error('Supabase key (anon/service-role) is required to create a client instance.');
+  }
   return createClient<Database>(supabaseUrl, supabaseKey, {
     auth: {
       persistSession: true,
@@ -22,7 +28,42 @@ export function createAdminSupabaseClient(
   supabaseUrl: string,
   serviceRoleKey: string
 ): TypedSupabaseClient {
+  if (typeof window !== 'undefined') {
+    throw new Error('Security Violation: Cannot create an admin Supabase client in the browser environment.');
+  }
+  if (!supabaseUrl) {
+    throw new Error('Supabase URL is required to create an admin client instance.');
+  }
+  if (!serviceRoleKey) {
+    throw new Error('Supabase service role key is required to create an admin client instance.');
+  }
   return createClient<Database>(supabaseUrl, serviceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+}
+
+export function createServerClient(
+  supabaseUrl?: string,
+  supabaseKey?: string
+): TypedSupabaseClient {
+  const url = supabaseUrl || process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = supabaseKey || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url) {
+    throw new Error(
+      'Database Client Error: Supabase URL is missing. Ensure NEXT_PUBLIC_SUPABASE_URL environment variable is set.'
+    );
+  }
+  if (!key) {
+    throw new Error(
+      'Database Client Error: Supabase Key is missing. Ensure NEXT_PUBLIC_SUPABASE_ANON_KEY environment variable is set.'
+    );
+  }
+
+  return createClient<Database>(url, key, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
