@@ -1,0 +1,230 @@
+# Phase 2 Release Gate — Status Report
+
+Branch: `hotfix/phase2-release-gate`
+Scope of this document: ESLint 9 flat-config correction and the verification
+evidence personally executed to support it. This document only records
+evidence confirmed by direct command execution or direct file inspection in
+this session — nothing is carried over from prior, uncommitted reports.
+
+Legend used below:
+- **Verified** — a command was executed in this session and its exit code /
+  output was inspected.
+- **Structurally inspected, execution pending** — the file/config was read
+  and its structure checked, but it has not been run end-to-end.
+- **Blocked by environment** — could not be executed due to a sandbox
+  limitation, not a defect in the repository.
+- **Pending verification** — not yet attempted.
+
+## 1. ESLint 9 flat configuration
+
+**Verified.**
+
+Root cause: only `apps/web/eslint.config.mjs` existed. ESLint 9 has no
+fallback config resolution, so every `packages/*` package's `"lint": "eslint
+."` script failed immediately with "no config found."
+
+Change made:
+- `eslint.config.mjs` (repo root) — new shared flat config for the TypeScript
+  library packages, built from `typescript-eslint` (`tseslint.config`) plus
+  `@eslint/js` recommended rules and `globals.node`. Ignores
+  `node_modules/**`, `dist/**`, `.turbo/**`, `.next/**`, `build/**`,
+  `coverage/**`.
+- `packages/*/eslint.config.mjs` (7 files) — thin re-exports of the root
+  config, required so `eslint .` resolves correctly when Turbo runs each
+  package's `lint` script with that package directory as the working
+  directory.
+- `apps/web/eslint.config.mjs` — **unchanged**, keeps its Next.js-specific
+  config (`eslint-config-next` core-web-vitals + typescript configs).
+- No source or test directories were excluded from linting. No blanket
+  `eslint-disable` comments were added. No recommended rule sets were
+  broadly disabled.
+
+**Genuine finding fixed:** `packages/observability/tests/logger.test.ts`
+imported `defaultLogger` from `../src/logger` but never used it. The dead
+import was removed (not suppressed).
+
+**Dependencies:** `eslint@9.39.5`, `typescript-eslint@8.64.0` (with its
+transitive `@typescript-eslint/eslint-plugin`/`parser@8.64.0`),
+`@eslint/js@9.39.5`, and `globals@16.4.0` were already resolved in
+`pnpm-lock.yaml` via `apps/web`'s dependency tree and hoisted into the root
+`node_modules` (`shamefully-hoist=true` in `.npmrc`). **No new packages were
+installed.** The root `package.json` now declares these as explicit
+`devDependencies` (they were previously only transitive/hoisted, which is
+fragile), which added 12 lines to `pnpm-lock.yaml` — all additive, no
+existing resolved version changed. No npm or Yarn lockfile was introduced.
+
+**Result:** `pnpm exec turbo run lint --force` → exit 0, 8/8 packages
+passing, 0 errors, 0 warnings, cache bypassed (see §6 for full run evidence).
+
+## 2. ADR-006 / adapter contract consistency
+
+**Verified (documentation/comment correction only — no implementation
+change).**
+
+- `docs/adr/ADR-006-provider-adapter-architecture.md` — Status remains
+  **Provisional**. Corrected the "Decision" section, which previously
+  described `generateText`, `streamText`, and `generateEmbedding` — none of
+  which are implemented. It now accurately states the adapter currently
+  exposes only `generateCompletion`, and lists the full capability set that
+  still requires a dedicated review (chat, streaming, structured output,
+  tool-call requests, embeddings, image generation, video jobs,
+  speech-to-text, text-to-speech, cancellation, timeouts, retry policy, error
+  normalization, usage/cost reporting, model-level capability discovery). It
+  explicitly states application tools must be executed by the orchestration
+  layer, not the provider adapter.
+- `packages/ai-providers/src/adapter.ts` — the file/interface comments
+  previously called the contract "frozen." Corrected to state the interface
+  is provisional, covers only `generateCompletion`, and must not be treated
+  as final until the capability review referenced in ADR-006 happens.
+- **No adapter code, method signatures, or provider implementations were
+  changed.** This was a documentation/comment-only correction, as scoped.
+
+## 3. Toolchain version reproducibility
+
+**Verified (report only — no dependency versions changed).**
+
+Exact versions currently resolved in `pnpm-lock.yaml`:
+
+| Root manifest specifier | Resolved version |
+|---|---|
+| `turbo: "latest"` | `2.10.5` |
+| `supabase: "^2.109.1"` | `2.109.1` |
+| `typescript: "^5.4.5"` | `5.9.3` |
+
+**Proposal (not applied — awaiting your decision):**
+- `turbo: "latest"` should be pinned to an exact version (`"2.10.5"`). As
+  written, every fresh `pnpm install` on a machine without a matching
+  lockfile entry can silently pick up a newer Turbo release, which changes
+  cache behavior/CLI flags without anyone deciding to upgrade.
+- `supabase: "^2.109.1"` — a caret range allows automatic minor/patch bumps
+  of the CLI. Given the CLI drives migrations and pgTAP execution, I'd
+  recommend pinning this exactly too (`"2.109.1"`), so a `pnpm install`
+  never changes what CLI version runs migrations without an explicit
+  decision.
+- `typescript: "^5.4.5"` resolving to `5.9.3` is a wide gap (minor-version
+  drift). Recommend re-pinning to the version actually in use (`"5.9.3"`) so
+  the manifest reflects reality, or deliberately deciding to downgrade if
+  `5.4.5` was intentional.
+
+I have **not** applied any of these changes — they require your explicit
+go-ahead since you asked that lockfile changes be intentional and reported,
+and this is a scope decision (toolchain pinning) beyond the lint fix itself.
+
+## 4. pgTAP inventory
+
+**Structurally inspected, execution pending.**
+
+```text
+File 1: supabase/tests/database/rls_adversarial.test.sql — plan 35 — 35 assertions
+File 2: supabase/tests/database/invitations_and_ownership.test.sql — plan 10 — 10 assertions
+Expected total: 45
+```
+
+Both files' `plan(N)` declarations match their actual assertion counts
+(counted via direct grep of pgTAP assertion functions: `ok`, `is`, `isnt`,
+`throws_ok`, `results_eq`, `is_empty`, `matches`, `cmp_ok`, `lives_ok`,
+`isa_ok`, `has_column`, `hasnt_column`, `col_type_is`, `policies_are`,
+`policy_cmd_is`). This is a **structural** check only — the SQL has not been
+executed against a running Postgres instance in this session. RLS is **not**
+described as fully verified; that requires the commands below to actually
+run.
+
+**Commands to run on Paul's Windows machine** (PowerShell or Git Bash, from
+the repo root, with Docker Desktop running):
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm exec supabase start
+pnpm exec supabase db reset
+pnpm exec supabase test db
+```
+
+`supabase db reset` re-applies `supabase/migrations/*.sql` and
+`supabase/seed.sql` against the local Postgres container. `supabase test db`
+then runs every `*.test.sql` file under `supabase/tests/database/` through
+pgTAP and reports pass/fail per assertion, which is the only way to actually
+confirm the 45 assertions above pass and that RLS behaves as intended.
+
+## 5. Missing implementation-plan artifacts
+
+**Confirmed:** `implementation_plan.md` and `walkthrough.md` do not exist in
+the working tree, in `git log --all`, or on any branch. Not blocking this
+work, per your instruction. This document (`docs/status/PHASE_2_RELEASE_GATE.md`)
+is the authoritative, personally-verified replacement for Phase 2 status —
+no content was copied from any prior, unverified report.
+
+## 6. Secrets-report file
+
+**Verified.** `secrets_report.json` was committed empty (0 bytes, git's
+empty-blob hash) in the very first consolidation commit of this repository
+and has never contained content in its history. Nothing in the
+repository — no CI workflow, no script, no documentation — references or
+regenerates this filename. It is stray/generated tool output, not a required
+source artifact.
+
+Action taken:
+- Removed from version control (`git rm --cached secrets_report.json`).
+- Added `secrets_report.json` to `.gitignore` under a "generated
+  secret-scanning report" comment.
+- Documenting the scan command here instead of committing its output. No
+  secret-scanner is currently installed or configured in this repo. The
+  recommended command (run locally, output stays untracked):
+
+```bash
+# from repo root, requires gitleaks installed locally
+gitleaks detect --source . --report-path secrets_report.json
+```
+
+No secret values were printed or exposed as part of this investigation.
+
+## 7. Fresh verification results (this session)
+
+All four commands were run via `pnpm exec turbo run <task> --force` to
+bypass Turbo's cache and force real execution, immediately after
+`pnpm install --frozen-lockfile` succeeded (exit 0).
+
+| Command | Exit code | Duration | Packages executed | Cached? |
+|---|---|---|---|---|
+| `pnpm install --frozen-lockfile` | 0 | ~3s | all 9 workspace projects | n/a (install) |
+| `pnpm exec turbo run lint --force` | 0 | 3.84s | 8/8 (`ai-providers`, `auth`, `database`, `feature-flags`, `jobs`, `observability`, `security`, `web`) | 0 cached / 8 total — all force-executed |
+| `pnpm exec turbo run typecheck --force` | 0 | 4.50s | 8/8 (same set) | 0 cached / 8 total — all force-executed |
+| `pnpm exec turbo run test --force` | 0 | 1.79s | 5/5 (`auth`, `database`, `observability`, `security`, `web` — the only packages with a `test` script) | 0 cached / 5 total — all force-executed |
+| `pnpm exec turbo run build --force` | 0 | 9.14s | 1/1 (`web` — the only package with a `build` script) | 0 cached / 1 total — force-executed |
+
+**Test files and assertion totals** (from the `test` run above):
+
+| Package | Test file | Assertions |
+|---|---|---|
+| `web` | `tests/app-config.test.ts` | 3 |
+| `web` | `src/proxy.test.ts` | 8 |
+| `web` | `src/app/api/v1/routes.test.ts` | 8 |
+| `auth` | `src/service.test.ts` | 5 |
+| `database` | `src/client.test.ts` | 10 |
+| `observability` | `tests/logger.test.ts` | 5 |
+| `security` | `tests/rls-adversarial.test.ts` | 6 |
+
+**Total: 7 test files, 45 assertions, all passing.**
+
+**Warnings:** none emitted by `lint`, `typecheck`, `test`, or `build` in any
+package during these runs.
+
+### Supabase (§4 commands)
+
+**Blocked by environment**, not by the repository:
+`pnpm exec supabase db reset` and `pnpm exec supabase test db` require a
+multi-container Docker Compose–style stack (Postgres, GoTrue, Kong,
+Realtime, Storage, etc.). In this sandbox, Docker itself runs and single
+containers work (`docker run hello-world` succeeds), but the daemon cannot
+bind-mount container network namespaces (`permission denied` on
+`/proc/.../ns/net`) needed to network the Supabase container stack together.
+This was confirmed directly, is a sandbox infrastructure restriction, and I
+did not repeatedly retry or leave containers/networks in a broken state —
+everything was cleaned up (`docker ps -a` is empty, working tree is clean).
+Run the commands in §4 on a machine with full local Docker privileges (e.g.
+Paul's Windows machine with Docker Desktop) to get real pass/fail evidence.
+
+## 8. Commit
+
+See the accompanying diff and commit hash reported separately. Nothing in
+this change touches `main`, creates a tag, deploys anything, or modifies any
+hosted Supabase project.
