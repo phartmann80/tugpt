@@ -277,6 +277,54 @@ The same command bundle above (`supabase start` / `db reset` / `test db`) is
 the only way to confirm this fix resolves the `23505` collision and all 45
 assertions pass.
 
+### Third real execution (Windows, after the User D fixture fix) — FINAL
+
+Reported result, from Paul's Windows machine (Docker Desktop,
+`pnpm exec supabase db reset` + `pnpm exec supabase test db`):
+
+```text
+supabase db reset: PASS
+
+invitations_and_ownership.test.sql: PASS — 10/10
+rls_adversarial.test.sql: PASS — 35/35
+
+All tests successful.
+Files=2
+Tests=45
+Result: PASS
+```
+
+This confirms, on a live Postgres instance (not structural inspection):
+1. The dollar-quote parser correction (first fix, above) is valid — Test 7's
+   `DO` block parses and executes correctly with distinct `$statement$` /
+   `$block$` tags.
+2. The narrowed `WHEN SQLSTATE 'P0001'` exception handler (first fix) is
+   correct — it catches exactly the intended ownership-protection exception
+   and does not mask unrelated errors.
+3. The User D fixture correction (second fix, above) is valid — User D's
+   membership insert succeeds (no `23505` collision) and reaches the
+   intended `UPDATE` that triggers `private.prevent_last_owner_removal()`.
+4. The PL/pgSQL exception subtransaction correctly rolls back User D's
+   insert once `P0001` is caught.
+5. Test 7b correctly observes zero User D memberships after rollback.
+6. `rls_adversarial.test.sql` continues to pass all 35 assertions, unaffected
+   by any of these changes.
+
+```text
+Database reset: verified passing on Windows with Docker Desktop
+invitations_and_ownership.test.sql: verified passing, 10/10
+rls_adversarial.test.sql: verified passing, 35/35
+Total pgTAP assertions: 45/45
+Phase 2 database gate: PASSED
+```
+
+**This is real, executed verification on a live Postgres instance via
+Docker Desktop on Paul's Windows machine — not a structural/sandbox
+inspection.** The database portion of the Phase 2 release gate is
+considered closed as of this execution. The two prior "not yet
+passed" / "still pending" results above are retained as-is for the audit
+trail; they are not rewritten or removed.
+
 ## 5. Missing implementation-plan artifacts
 
 **Confirmed:** `implementation_plan.md` and `walkthrough.md` do not exist in
@@ -353,12 +401,23 @@ This was confirmed directly, is a sandbox infrastructure restriction, and I
 did not repeatedly retry or leave containers/networks in a broken state —
 everything was cleaned up (`docker ps -a` is empty, working tree is clean).
 
-**Real execution did happen — on Paul's Windows machine, not this sandbox.**
-See §4 for the full result: `supabase db reset` passed, `rls_adversarial.test.sql`
-passed 35/35, `invitations_and_ownership.test.sql` failed with a SQL parser
-error after 8/10 assertions. The fix for that failure is recorded in §4; it
-has been structurally reviewed but **not yet re-executed** — the database
-gate remains **not yet passed** until Paul re-runs it and confirms.
+**Real execution did happen on Paul's Windows machine, not this sandbox.**
+See section 4 above for the full historical record of all three real
+executions. Summary as of the final (third) execution:
+
+```text
+Database reset: verified passing on Windows with Docker Desktop
+invitations_and_ownership.test.sql: verified passing, 10/10
+rls_adversarial.test.sql: verified passing, 35/35
+Total pgTAP assertions: 45/45
+Phase 2 database gate: PASSED
+```
+
+This reflects real execution on a live Postgres instance via Docker
+Desktop on Paul's Windows machine, not a structural/sandbox inspection.
+The two earlier "not yet passed" results recorded in section 4 remain in
+this document as the audit trail of the process that led here; they are
+not rewritten or removed.
 
 ## 7b. Post-fix verification (this session — Test 7 dollar-quote / exception-handler correction)
 
@@ -389,9 +448,44 @@ pass since nothing affecting `web`'s build changed.
 | `pnpm exec turbo run test --force` | 0 | 1.625s | 5/5 (7 test files) | 0 cached / 5 total — all force-executed |
 
 **Total: 7 test files, 45 JS/TS assertions, all passing.** Same caveat as
-§7b: this is the JS/TS suite only. The pgTAP fixture fix itself has not been
-re-executed in this sandbox and is not claimed as passing — see §4 for the
-exact re-run commands for Paul's Windows machine.
+§7b: this is the JS/TS suite only, executed in this sandbox. The pgTAP
+fixture fix itself was not re-executed here — it was subsequently re-run on
+Paul's Windows machine and confirmed **passing 10/10** (see the "Third real
+execution" subsection in §4, and §7d below). This note is left as originally
+written, at the time it was true, for the audit trail.
+
+## 7d. Final database gate confirmation (Windows, third execution)
+
+This subsection records the documentation-only synchronization after Paul's
+third Windows execution confirmed the pgTAP database gate passes in full.
+No application code, migrations, SQL test files, dependencies, or the
+lockfile were touched in this update — only this status document.
+
+```text
+Database reset: verified passing on Windows with Docker Desktop
+invitations_and_ownership.test.sql: verified passing, 10/10
+rls_adversarial.test.sql: verified passing, 35/35
+Total pgTAP assertions: 45/45
+Phase 2 database gate: PASSED
+```
+
+Fresh (forced, non-cached) verification re-run in this sandbox alongside
+this documentation update, confirming no regression from the doc-only
+change:
+
+| Command | Exit code | Packages executed | Cached? |
+|---|---|---|---|
+| `pnpm install --frozen-lockfile` | 0 | 9 workspace projects | n/a (install) |
+| `pnpm exec turbo run lint --force` | 0 | 8/8 | 0 cached / 8 total — all force-executed |
+| `pnpm exec turbo run typecheck --force` | 0 | 8/8 | 0 cached / 8 total — all force-executed |
+| `pnpm exec turbo run test --force` | 0 | 5/5 (7 test files, 45 assertions) | 0 cached / 5 total — all force-executed |
+| `pnpm exec turbo run build --force` | 0 | 1/1 (`web`) | 0 cached / 1 total — force-executed |
+
+**Phase 2 release gate: CLOSED.** All ESLint, typecheck, JS/TS test, build,
+and pgTAP database verification is now confirmed passing — the JS/TS suite
+in this sandbox, the pgTAP suite on Paul's Windows machine with Docker
+Desktop. No merge into `main`, tag, or deployment has been performed as part
+of this or any prior step in this document.
 
 ## 8. Commit
 
