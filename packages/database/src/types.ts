@@ -65,6 +65,91 @@ export interface FeatureFlag {
   updated_at: string;
 }
 
+// -- Phase 3A: secure asynchronous inbound-message foundation -------------
+
+export type WhatsAppConnectionStatus = 'pending' | 'connected' | 'error' | 'disconnected';
+export type WebhookEventStatus = 'received' | 'processed' | 'failed';
+export type ConversationStatus = 'open' | 'needs_human' | 'closed';
+export type MessageDirection = 'inbound' | 'outbound';
+export type MessageStatus = 'received' | 'draft' | 'sent' | 'failed';
+
+export interface BusinessProfile {
+  id: string;
+  organization_id: string;
+  business_name: string;
+  greeting_message: string | null;
+  operating_hours: Record<string, unknown>;
+  escalation_email: string | null;
+  escalation_phone: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WhatsAppConnection {
+  id: string;
+  organization_id: string;
+  phone_number_id: string;
+  waba_id: string | null;
+  display_phone_number: string | null;
+  access_token_ref: string | null;
+  app_secret_ref: string | null;
+  verify_token_ref: string | null;
+  status: WhatsAppConnectionStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebhookEvent {
+  id: string;
+  organization_id: string | null;
+  whatsapp_connection_id: string | null;
+  provider: string;
+  provider_event_id: string;
+  signature_verified: boolean;
+  status: WebhookEventStatus;
+  contact_wa_id: string | null;
+  message_type: string | null;
+  body_text: string | null;
+  wa_timestamp: string | null;
+  received_at: string;
+  processed_at: string | null;
+}
+
+export interface Conversation {
+  id: string;
+  organization_id: string;
+  whatsapp_connection_id: string;
+  contact_wa_id: string;
+  status: ConversationStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Message {
+  id: string;
+  organization_id: string;
+  conversation_id: string;
+  whatsapp_connection_id: string;
+  webhook_event_id: string | null;
+  wa_message_id: string | null;
+  direction: MessageDirection;
+  status: MessageStatus;
+  body: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FailedJob {
+  id: string;
+  organization_id: string | null;
+  queue_name: string;
+  pgmq_msg_id: number | null;
+  payload: Record<string, unknown>;
+  error: string | null;
+  attempts: number;
+  created_at: string;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -98,6 +183,36 @@ export interface Database {
         Insert: Omit<FeatureFlag, 'id' | 'created_at' | 'updated_at'> & { id?: string; created_at?: string; updated_at?: string };
         Update: Partial<FeatureFlag>;
       };
+      business_profiles: {
+        Row: BusinessProfile;
+        Insert: Omit<BusinessProfile, 'id' | 'created_at' | 'updated_at'> & { id?: string; created_at?: string; updated_at?: string };
+        Update: Partial<BusinessProfile>;
+      };
+      whatsapp_connections: {
+        Row: WhatsAppConnection;
+        Insert: Omit<WhatsAppConnection, 'id' | 'created_at' | 'updated_at'> & { id?: string; created_at?: string; updated_at?: string };
+        Update: Partial<WhatsAppConnection>;
+      };
+      webhook_events: {
+        Row: WebhookEvent;
+        Insert: Omit<WebhookEvent, 'id' | 'received_at'> & { id?: string; received_at?: string };
+        Update: Partial<WebhookEvent>;
+      };
+      conversations: {
+        Row: Conversation;
+        Insert: Omit<Conversation, 'id' | 'created_at' | 'updated_at'> & { id?: string; created_at?: string; updated_at?: string };
+        Update: Partial<Conversation>;
+      };
+      messages: {
+        Row: Message;
+        Insert: Omit<Message, 'id' | 'created_at' | 'updated_at'> & { id?: string; created_at?: string; updated_at?: string };
+        Update: Partial<Message>;
+      };
+      failed_jobs: {
+        Row: FailedJob;
+        Insert: Omit<FailedJob, 'id' | 'created_at'> & { id?: string; created_at?: string };
+        Update: Partial<FailedJob>;
+      };
     };
     Views: {
       [_ in never]: never;
@@ -111,10 +226,51 @@ export interface Database {
         };
         Returns: string;
       };
+      pgmq_send: {
+        Args: {
+          p_queue_name: string;
+          p_message: Record<string, unknown>;
+          p_delay_seconds?: number;
+        };
+        Returns: number;
+      };
+      pgmq_read: {
+        Args: {
+          p_queue_name: string;
+          p_visibility_timeout_seconds: number;
+          p_quantity: number;
+        };
+        Returns: Array<{
+          msg_id: number;
+          read_ct: number;
+          enqueued_at: string;
+          vt: string;
+          message: Record<string, unknown>;
+        }>;
+      };
+      pgmq_archive: {
+        Args: {
+          p_queue_name: string;
+          p_msg_id: number;
+        };
+        Returns: boolean;
+      };
+      pgmq_delete: {
+        Args: {
+          p_queue_name: string;
+          p_msg_id: number;
+        };
+        Returns: boolean;
+      };
     };
     Enums: {
       organization_role: OrganizationRole;
       invitation_status: InvitationStatus;
+      whatsapp_connection_status: WhatsAppConnectionStatus;
+      webhook_event_status: WebhookEventStatus;
+      conversation_status: ConversationStatus;
+      message_direction: MessageDirection;
+      message_status: MessageStatus;
     };
   };
 }

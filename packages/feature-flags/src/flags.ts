@@ -16,7 +16,10 @@ export class FeatureFlagService {
 
   constructor() {
     // Default system flags
-    this.flags.set('whatsapp_integration', { isEnabled: true });
+    // whatsapp_integration is disabled by default (Phase 3A): the webhook
+    // foundation, queue, and worker introduced in Phase 3A are built but
+    // must not be reachable by end users until explicitly enabled per-org.
+    this.flags.set('whatsapp_integration', { isEnabled: false });
     this.flags.set('voice_receptionist', { isEnabled: true });
     this.flags.set('langdock_orchestrator', { isEnabled: true });
     this.flags.set('mastra_orchestrator', { isEnabled: true });

@@ -25,6 +25,15 @@ export interface CompletionOptions {
   readonly maxTokens?: number;
   readonly organizationId?: string;
   readonly requestId?: string;
+  /**
+   * Real cancellation (Phase 3A, see ADR-006 item 5 and ADR-011). Adapters
+   * that perform a network call MUST forward this signal to the underlying
+   * transport so an orchestration-level timeout or shutdown actually
+   * cancels the in-flight request. Optional so existing adapter
+   * implementations remain valid without modification until each is
+   * updated to honor it.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface CompletionResponse {

@@ -41,6 +41,8 @@ export class LangdockAdapter implements AIProviderAdapter {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify(requestBody),
+        // Real cancellation per ADR-006 item 5 / ADR-011.
+        signal: options.signal,
       });
 
       const latencyMs = Date.now() - startTime;
