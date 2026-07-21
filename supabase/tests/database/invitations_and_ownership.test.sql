@@ -182,24 +182,42 @@ SELECT throws_ok(
 -- The exception must abort and rollback all changes in the nested block.
 SET LOCAL ROLE postgres;
 
--- We try to run a subtransaction via a DO block
+-- We try to run a subtransaction via a DO block.
+-- Distinct tagged dollar-quote delimiters ($statement$ / $block$) are used so
+-- the outer pgTAP string literal and the inner DO block body cannot collide,
+-- unlike the previous "$$DO $$$ ... $$$$" construction which the Postgres
+-- parser could not tokenize (outer $$ was closed by the inner DO's $$).
+--
+-- The exception handler intentionally catches only SQLSTATE 'P0001' — the
+-- specific code raised by private.prevent_last_owner_removal() (a bare
+-- `RAISE EXCEPTION` with no explicit SQLSTATE defaults to P0001, matching
+-- every other throws_ok() assertion in this file). Catching WHEN OTHERS here
+-- would silently swallow an unrelated failure (e.g. a broken INSERT) and let
+-- this test pass for the wrong reason; anything other than P0001 re-raises
+-- and correctly fails the test instead of being hidden.
 SELECT lives_ok(
-  $$DO $$$
+  $statement$
+  DO $block$
   BEGIN
     -- This insert is valid
     INSERT INTO public.organization_members (organization_id, user_id, role)
     VALUES ('d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1', '33333333-3333-3333-3333-333333333333', 'agent');
-    
-    -- This triggers P0001 (aborts transaction block)
+
+    -- This triggers P0001 via private.prevent_last_owner_removal()
+    -- (User B is currently the organization's sole owner; see Tests 4-5).
     UPDATE public.organization_members
     SET role = 'admin'
     WHERE organization_id = 'd1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1'
       AND user_id = '22222222-2222-2222-2222-222222222222';
-  EXCEPTION WHEN OTHERS THEN
-    -- Rollback / cancel block
-    NULL;
+  EXCEPTION
+    WHEN SQLSTATE 'P0001' THEN
+      -- Expected ownership-protection exception: the PL/pgSQL exception
+      -- block's implicit subtransaction rolls back everything since BEGIN,
+      -- including the earlier valid INSERT above. Swallow only this code.
+      NULL;
   END;
-  $$$$,
+  $block$;
+  $statement$,
   'Test 7a: Traps exception inside nested query execution block'
 );
 

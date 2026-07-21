@@ -112,8 +112,6 @@ and this is a scope decision (toolchain pinning) beyond the lint fix itself.
 
 ## 4. pgTAP inventory
 
-**Structurally inspected, execution pending.**
-
 ```text
 File 1: supabase/tests/database/rls_adversarial.test.sql — plan 35 — 35 assertions
 File 2: supabase/tests/database/invitations_and_ownership.test.sql — plan 10 — 10 assertions
@@ -124,13 +122,80 @@ Both files' `plan(N)` declarations match their actual assertion counts
 (counted via direct grep of pgTAP assertion functions: `ok`, `is`, `isnt`,
 `throws_ok`, `results_eq`, `is_empty`, `matches`, `cmp_ok`, `lives_ok`,
 `isa_ok`, `has_column`, `hasnt_column`, `col_type_is`, `policies_are`,
-`policy_cmd_is`). This is a **structural** check only — the SQL has not been
-executed against a running Postgres instance in this session. RLS is **not**
-described as fully verified; that requires the commands below to actually
-run.
+`policy_cmd_is`). This was a **structural** check only in this sandbox (no
+running Postgres instance available here — see §6).
 
-**Commands to run on Paul's Windows machine** (PowerShell or Git Bash, from
-the repo root, with Docker Desktop running):
+**Real execution result, from Paul's Windows machine (Docker Desktop,
+`pnpm exec supabase db reset` + `pnpm exec supabase test db`):**
+
+```text
+supabase db reset: verified passing
+rls_adversarial.test.sql: verified passing, 35 assertions
+invitations_and_ownership.test.sql: parser failure after 8 assertions
+Phase 2 database gate: not yet passed
+```
+
+The failure was a genuine defect, not a false negative: a SQL parser error
+(`syntax error at or near "$"`) at line ~204 of
+`invitations_and_ownership.test.sql`, Test 7a. The original code used the
+same `$$` dollar-quote tag for both the outer pgTAP string literal and the
+inner `DO` block body:
+
+```sql
+SELECT lives_ok(
+  $$DO $$$
+  ...
+  $$$$,
+  ...
+);
+```
+
+Postgres's tokenizer closes a dollar-quoted string at the **first** matching
+tag, so the outer `$$` was terminated by the inner `DO $$`'s tag, corrupting
+the rest of the statement.
+
+**Fix applied** (`supabase/tests/database/invitations_and_ownership.test.sql`,
+Test 7, this session): switched to distinct tagged delimiters — `$statement$`
+wrapping the pgTAP argument, `$block$` wrapping the `DO` block body — so the
+two cannot collide. While reviewing the block semantically (not just for the
+parser fix), a second, real issue was found and corrected: the original
+`EXCEPTION WHEN OTHERS THEN NULL;` would silently swallow *any* error inside
+the block, including an unrelated bug (e.g. a broken `INSERT`), and let the
+test pass for the wrong reason. Narrowed to `WHEN SQLSTATE 'P0001'` — the
+specific code `private.prevent_last_owner_removal()` raises (a bare `RAISE
+EXCEPTION` with no explicit SQLSTATE defaults to `P0001`, matching every
+other `throws_ok()` assertion in this file) — so anything else now correctly
+re-raises and fails the test instead of being hidden.
+
+Semantic review performed against this fix (structural only, not yet
+re-executed — see below):
+1. The ownership-protection exception is expected to fire: at that point in
+   the test, User B (`22222222-...`) is the organization's sole owner
+   (established by Tests 4-5), so the `UPDATE ... SET role='admin'` on B
+   triggers `private.prevent_last_owner_removal()`, which raises `P0001`.
+2. The narrowed handler no longer masks unrelated errors.
+3. PL/pgSQL's implicit exception-block subtransaction rolls back everything
+   since `BEGIN`, including the preceding valid `INSERT`, once the exception
+   is caught.
+4. Test 7b's expectation of a zero member count for that row is therefore
+   correct and unchanged.
+5. Assertion count confirmed unchanged: `plan(10)` and exactly 10 pgTAP
+   assertion calls (`grep`-counted after the edit).
+6. No production migration or RLS policy/function was changed — only the
+   test file. `private.prevent_last_owner_removal()` in
+   `supabase/migrations/20260716000001_initial_schema.sql` is untouched.
+
+**This fix has NOT been re-executed against a live Postgres instance in this
+sandbox** (same Docker/network limitation as before). Per your explicit
+instruction, this test is **not** claimed as passing. It is:
+
+```text
+invitations_and_ownership.test.sql: fix applied, re-execution pending on Paul's machine
+Phase 2 database gate: not yet passed — awaiting Paul's re-run
+```
+
+**Commands to re-run on Paul's Windows machine** (PowerShell or Git Bash,
+from the repo root, with Docker Desktop running):
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -142,8 +207,8 @@ pnpm exec supabase test db
 `supabase db reset` re-applies `supabase/migrations/*.sql` and
 `supabase/seed.sql` against the local Postgres container. `supabase test db`
 then runs every `*.test.sql` file under `supabase/tests/database/` through
-pgTAP and reports pass/fail per assertion, which is the only way to actually
-confirm the 45 assertions above pass and that RLS behaves as intended.
+pgTAP and reports pass/fail per assertion — the only way to confirm the fix
+above actually resolves the parser failure and all 45 assertions pass.
 
 ## 5. Missing implementation-plan artifacts
 
@@ -210,7 +275,7 @@ package during these runs.
 
 ### Supabase (§4 commands)
 
-**Blocked by environment**, not by the repository:
+**Blocked by environment in this sandbox**, not by the repository:
 `pnpm exec supabase db reset` and `pnpm exec supabase test db` require a
 multi-container Docker Compose–style stack (Postgres, GoTrue, Kong,
 Realtime, Storage, etc.). In this sandbox, Docker itself runs and single
@@ -220,8 +285,29 @@ bind-mount container network namespaces (`permission denied` on
 This was confirmed directly, is a sandbox infrastructure restriction, and I
 did not repeatedly retry or leave containers/networks in a broken state —
 everything was cleaned up (`docker ps -a` is empty, working tree is clean).
-Run the commands in §4 on a machine with full local Docker privileges (e.g.
-Paul's Windows machine with Docker Desktop) to get real pass/fail evidence.
+
+**Real execution did happen — on Paul's Windows machine, not this sandbox.**
+See §4 for the full result: `supabase db reset` passed, `rls_adversarial.test.sql`
+passed 35/35, `invitations_and_ownership.test.sql` failed with a SQL parser
+error after 8/10 assertions. The fix for that failure is recorded in §4; it
+has been structurally reviewed but **not yet re-executed** — the database
+gate remains **not yet passed** until Paul re-runs it and confirms.
+
+## 7b. Post-fix verification (this session — Test 7 dollar-quote / exception-handler correction)
+
+Same fresh, forced (non-cached) commands re-run after the
+`invitations_and_ownership.test.sql` fix described in §4. `build` was not
+re-run in this pass since nothing affecting `web`'s build changed.
+
+| Command | Exit code | Duration | Packages executed | Cached? |
+|---|---|---|---|---|
+| `pnpm exec turbo run lint --force` | 0 | 3.72s | 8/8 | 0 cached / 8 total — all force-executed |
+| `pnpm exec turbo run typecheck --force` | 0 | 3.93s | 8/8 | 0 cached / 8 total — all force-executed |
+| `pnpm exec turbo run test --force` | 0 | 1.67s | 5/5 (7 test files) | 0 cached / 5 total — all force-executed |
+
+**Total: 7 test files, 45 JS/TS assertions, all passing.** (This is the same
+JS/TS suite as §7 — the `.test.sql` fix only touches the pgTAP file, which
+this sandbox cannot execute; see above.) No warnings emitted by any command.
 
 ## 8. Commit
 
