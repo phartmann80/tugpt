@@ -207,8 +207,75 @@ pnpm exec supabase test db
 `supabase db reset` re-applies `supabase/migrations/*.sql` and
 `supabase/seed.sql` against the local Postgres container. `supabase test db`
 then runs every `*.test.sql` file under `supabase/tests/database/` through
-pgTAP and reports pass/fail per assertion — the only way to confirm the fix
-above actually resolves the parser failure and all 45 assertions pass.
+pgTAP and reports pass/fail per assertion.
+
+### Second real execution (Windows, after the dollar-quote fix)
+
+The dollar-quote parser fix above was confirmed to resolve the original
+parser error: Test 7 now executes as valid SQL. A second, distinct defect
+then surfaced — this is a genuine test-fixture bug, not a false negative:
+
+```text
+Parser defect: fixed and confirmed resolved
+Second execution:
+- rls_adversarial.test.sql: 35/35 pass
+- invitations_and_ownership.test.sql: 8/10 pass
+- Test 7a failed with 23505 because User C already existed from Test 3
+- Test 7b observed that existing User C row
+Phase 2 database gate: still pending
+```
+
+**Root cause:** Test 3 calls `accept_invitation()` for User C
+(`33333333-...`), which creates a real `organization_members` row for User C.
+Test 7a's `DO` block then attempted to `INSERT` a *second* membership row for
+that same `(organization_id, user_id)` pair, which Postgres correctly
+rejected with `23505` (unique violation) — before the block ever reached the
+intended `UPDATE` that should trigger `P0001`. Because the `INSERT` never
+committed, the DO block's exception handler was never exercised as designed.
+Test 7b then counted User C's real, pre-existing membership row (1), not a
+rolled-back one (0), so it failed too. The `WHEN SQLSTATE 'P0001'` handler
+from the previous fix was correct and untouched by this change — the defect
+was a test-fixture collision, not a handler problem.
+
+**Fix applied (this session):** added a fourth test user, User D
+(`44444444-4444-4444-4444-444444444444`, `rollback_d@tugpt.ai`), seeded into
+`auth.users` and `public.profiles` only — deliberately **not** added to
+`organization_members` during setup. Test 7a's `INSERT` and Test 7b's count
+assertion now both target User D instead of User C, so the test begins with
+a genuinely absent membership row, guaranteeing the `INSERT` succeeds
+initially and the rollback assertion is real.
+
+Semantic review performed against this fixture fix:
+1. User D exists as a profile but has no organization membership before
+   Test 7 (confirmed: absent from the setup `organization_members` seed).
+2. The User D insert succeeds initially (no unique-constraint collision,
+   since the row is genuinely new).
+3. The subsequent `UPDATE` on sole-owner User B still raises `P0001`,
+   unchanged from the previous fix.
+4. Catching that exception rolls back the User D insert within the
+   PL/pgSQL exception subtransaction (same mechanism as before).
+5. Test 7b verifies the rollback by finding zero User D memberships —
+   this is now a real assertion of rollback behavior, not an artifact of a
+   pre-existing row.
+6. User C's Test-3 membership is untouched — Test 7's block never
+   references User C's id.
+7. `plan(10)` and exactly 10 pgTAP assertions confirmed unchanged
+   (`grep`-counted after the edit).
+8. No production migration, trigger, constraint, function, or RLS policy
+   was changed — only the test file. `private.prevent_last_owner_removal()`
+   and the `organization_members` unique constraint are both untouched.
+
+**This fixture fix has NOT been re-executed against a live Postgres instance
+in this sandbox** (same Docker/network limitation as before). It is:
+
+```text
+invitations_and_ownership.test.sql: fixture fix applied, re-execution pending on Paul's machine
+Phase 2 database gate: still pending — awaiting Paul's next re-run
+```
+
+The same command bundle above (`supabase start` / `db reset` / `test db`) is
+the only way to confirm this fix resolves the `23505` collision and all 45
+assertions pass.
 
 ## 5. Missing implementation-plan artifacts
 
@@ -308,6 +375,23 @@ re-run in this pass since nothing affecting `web`'s build changed.
 **Total: 7 test files, 45 JS/TS assertions, all passing.** (This is the same
 JS/TS suite as §7 — the `.test.sql` fix only touches the pgTAP file, which
 this sandbox cannot execute; see above.) No warnings emitted by any command.
+
+## 7c. Post-fixture-fix verification (this session — Test 7 User-D fixture correction)
+
+Same fresh, forced (non-cached) commands re-run after the User D test-fixture
+fix described in §4 ("Second real execution"). `build` was not re-run in this
+pass since nothing affecting `web`'s build changed.
+
+| Command | Exit code | Duration | Packages executed | Cached? |
+|---|---|---|---|---|
+| `pnpm exec turbo run lint --force` | 0 | 4.01s | 8/8 | 0 cached / 8 total — all force-executed |
+| `pnpm exec turbo run typecheck --force` | 0 | 4.26s | 8/8 | 0 cached / 8 total — all force-executed |
+| `pnpm exec turbo run test --force` | 0 | 1.625s | 5/5 (7 test files) | 0 cached / 5 total — all force-executed |
+
+**Total: 7 test files, 45 JS/TS assertions, all passing.** Same caveat as
+§7b: this is the JS/TS suite only. The pgTAP fixture fix itself has not been
+re-executed in this sandbox and is not claimed as passing — see §4 for the
+exact re-run commands for Paul's Windows machine.
 
 ## 8. Commit
 
