@@ -12,19 +12,19 @@ importers:
         specifier: 9.39.5
         version: 9.39.5
       eslint:
-        specifier: ^9
+        specifier: 9.39.5
         version: 9.39.5(jiti@2.7.0)
       globals:
         specifier: 16.4.0
         version: 16.4.0
       supabase:
-        specifier: ^2.109.1
+        specifier: 2.109.1
         version: 2.109.1
       turbo:
-        specifier: latest
+        specifier: 2.10.5
         version: 2.10.5
       typescript:
-        specifier: ^5.4.5
+        specifier: 5.9.3
         version: 5.9.3
       typescript-eslint:
         specifier: 8.64.0
