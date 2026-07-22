@@ -26,31 +26,31 @@ CREATE EXTENSION IF NOT EXISTS "pgmq";
 -- 2. ENUM TYPES
 -- -----------------------------------------------------------------------------
 
-CREATE TYPE whatsapp_connection_status AS ENUM (
+CREATE TYPE public.whatsapp_connection_status AS ENUM (
   'pending',
   'connected',
   'error',
   'disconnected'
 );
 
-CREATE TYPE webhook_event_status AS ENUM (
+CREATE TYPE public.webhook_event_status AS ENUM (
   'received',
   'processed',
   'failed'
 );
 
-CREATE TYPE conversation_status AS ENUM (
+CREATE TYPE public.conversation_status AS ENUM (
   'open',
   'needs_human',
   'closed'
 );
 
-CREATE TYPE message_direction AS ENUM (
+CREATE TYPE public.message_direction AS ENUM (
   'inbound',
   'outbound'
 );
 
-CREATE TYPE message_status AS ENUM (
+CREATE TYPE public.message_status AS ENUM (
   'received',
   'draft',
   'sent',
@@ -87,7 +87,7 @@ CREATE TABLE public.whatsapp_connections (
   access_token_ref TEXT,
   app_secret_ref TEXT,
   verify_token_ref TEXT,
-  status whatsapp_connection_status NOT NULL DEFAULT 'pending',
+  status public.whatsapp_connection_status NOT NULL DEFAULT 'pending',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT unique_phone_number_id UNIQUE (phone_number_id)
@@ -105,7 +105,7 @@ CREATE TABLE public.webhook_events (
   provider_event_id TEXT NOT NULL,
   event_kind TEXT NOT NULL,
   signature_verified BOOLEAN NOT NULL CHECK (signature_verified),
-  status webhook_event_status NOT NULL DEFAULT 'received',
+  status public.webhook_event_status NOT NULL DEFAULT 'received',
   received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   processed_at TIMESTAMPTZ,
   CONSTRAINT unique_provider_event UNIQUE (provider, provider_event_id)
@@ -131,7 +131,7 @@ CREATE TABLE public.conversations (
   organization_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
   whatsapp_connection_id UUID NOT NULL REFERENCES public.whatsapp_connections(id) ON DELETE CASCADE,
   contact_wa_id TEXT NOT NULL,
-  status conversation_status NOT NULL DEFAULT 'open',
+  status public.conversation_status NOT NULL DEFAULT 'open',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT unique_connection_contact UNIQUE (whatsapp_connection_id, contact_wa_id)
@@ -147,8 +147,8 @@ CREATE TABLE public.messages (
   whatsapp_connection_id UUID NOT NULL REFERENCES public.whatsapp_connections(id) ON DELETE CASCADE,
   webhook_event_id UUID REFERENCES public.webhook_events(id) ON DELETE SET NULL,
   wa_message_id TEXT,
-  direction message_direction NOT NULL,
-  status message_status NOT NULL DEFAULT 'received',
+  direction public.message_direction NOT NULL,
+  status public.message_status NOT NULL DEFAULT 'received',
   body TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -236,11 +236,11 @@ CREATE POLICY "Owners and Admins can manage business profile"
   ON public.business_profiles FOR ALL
   USING (
     auth.role() = 'authenticated'
-    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin']::organization_role[])
+    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin']::public.organization_role[])
   )
   WITH CHECK (
     auth.role() = 'authenticated'
-    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin']::organization_role[])
+    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin']::public.organization_role[])
   );
 
 -- --- WHATSAPP_CONNECTIONS POLICIES ---
@@ -255,11 +255,11 @@ CREATE POLICY "Owners and Admins can manage WhatsApp connections"
   ON public.whatsapp_connections FOR ALL
   USING (
     auth.role() = 'authenticated'
-    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin']::organization_role[])
+    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin']::public.organization_role[])
   )
   WITH CHECK (
     auth.role() = 'authenticated'
-    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin']::organization_role[])
+    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin']::public.organization_role[])
   );
 
 -- webhook_events and inbound_message_staging intentionally have no policies.
@@ -278,11 +278,11 @@ CREATE POLICY "Managers, Admins, and Owners can update conversations"
   ON public.conversations FOR UPDATE
   USING (
     auth.role() = 'authenticated'
-    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin', 'manager']::organization_role[])
+    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin', 'manager']::public.organization_role[])
   )
   WITH CHECK (
     auth.role() = 'authenticated'
-    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin', 'manager']::organization_role[])
+    AND private.has_org_role(organization_id, auth.uid(), ARRAY['owner', 'admin', 'manager']::public.organization_role[])
   );
 
 -- --- MESSAGES POLICIES ---
