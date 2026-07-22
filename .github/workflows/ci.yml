@@ -6,9 +6,13 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,3 +41,26 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  database-tests:
+    name: Database pgTAP (92 assertions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.109.1
+
+      - name: Start isolated test database
+        run: supabase db start
+
+      - name: Run database tests
+        run: supabase test db
+
+      - name: Stop isolated test database
+        if: always()
+        run: supabase stop --no-backup

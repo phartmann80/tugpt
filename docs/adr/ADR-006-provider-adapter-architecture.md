@@ -20,7 +20,16 @@ TuGPT.ai will integrate with multiple AI providers (OpenAI, Langdock, Mastra). W
    All three currently implement only `generateCompletion`.
 3. Factory Pattern: `AIProviderFactory.getAdapter(providerName)` resolves and instantiates the appropriate adapter based on organization configuration and feature flags.
 4. Authorization Constraint: Live production API calls to external AI providers remain disabled until Phase 3 authorization.
-5. Pending Capability Review: the architecture remains **provisional** because the full
+5. Real Cancellation (Phase 3A): `CompletionOptions` gains an optional
+   `signal?: AbortSignal`. Adapters that perform a network call MUST pass this
+   signal through to the underlying transport (e.g. `fetch`'s own `signal`
+   option) so an aborted orchestration-level timeout or shutdown actually
+   cancels the in-flight request rather than merely abandoning a promise.
+   This is a contract addition, not a capability expansion — it does not
+   imply streaming, tool calls, or any other item in the list below. Phase 3A
+   introduces no live provider calls; no adapter's network path is exercised
+   as part of this change, only the interface shape.
+6. Pending Capability Review: the architecture remains **provisional** because the full
    provider contract has not yet been designed. A future capability-based review must
    cover, at minimum:
    - Chat
@@ -32,7 +41,6 @@ TuGPT.ai will integrate with multiple AI providers (OpenAI, Langdock, Mastra). W
    - Video jobs
    - Speech-to-text
    - Text-to-speech
-   - Cancellation
    - Timeouts
    - Retry policy
    - Error normalization
@@ -40,6 +48,8 @@ TuGPT.ai will integrate with multiple AI providers (OpenAI, Langdock, Mastra). W
    - Model-level capability discovery
    Application tools (function/tool-calling) must be executed by the orchestration layer,
    never directly by a provider adapter — adapters stay thin transport wrappers.
+   See ADR-011 for how Mastra fits this boundary as the orchestration runtime,
+   not as an adapter peer.
 
 ## Consequences
 - Single decoupled interface for the one capability implemented so far (chat completion).

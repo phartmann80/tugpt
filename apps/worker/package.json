@@ -1,19 +1,23 @@
 {
-  "name": "@tugpt/jobs",
+  "name": "@tugpt/worker",
   "version": "0.1.0",
   "private": true,
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
+    "start": "tsx src/index.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
   },
   "dependencies": {
-    "@tugpt/database": "workspace:*"
+    "@tugpt/database": "workspace:*",
+    "@tugpt/jobs": "workspace:*",
+    "@tugpt/observability": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20",
+    "tsx": "^4",
     "typescript": "^5",
     "vitest": "^4.1.10"
   }

@@ -39,6 +39,10 @@ export class OpenAIAdapter implements AIProviderAdapter {
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens ?? 1024,
         }),
+        // Real cancellation per ADR-006 item 5 / ADR-011: forward the
+        // orchestration-level AbortSignal to the transport so a timeout or
+        // shutdown actually cancels the in-flight request.
+        signal: options.signal,
       });
 
       const latencyMs = Date.now() - startTime;

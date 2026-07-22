@@ -43,6 +43,11 @@ export class MastraAdapter implements AIProviderAdapter {
           'X-Mastra-Api-Key': this.apiKey,
         },
         body: JSON.stringify(requestBody),
+        // Real cancellation per ADR-006 item 5 / ADR-011. Note: per ADR-011,
+        // this class is legacy under the new model (Mastra is the
+        // orchestration runtime, not an adapter peer) and is not renamed or
+        // repurposed as part of Phase 3A.
+        signal: options.signal,
       });
 
       const latencyMs = Date.now() - startTime;
