@@ -43,6 +43,15 @@ function extractImportedModules(source: string): string[] {
 }
 
 describe('Phase 3A webhook route scope boundary', () => {
+  it('the webhook route has one atomic ingestion boundary and no split table/enqueue path', () => {
+    const routeFile = join(REPO_ROOT, 'apps/web/src/app/api/v1/webhooks/whatsapp/route.ts');
+    const source = readFileSync(routeFile, 'utf-8');
+
+    expect(source).toContain('.ingestWhatsAppMessageEvent(');
+    expect(source).not.toMatch(/\.from\(['"](?:webhook_events|inbound_message_staging)['"]\)/);
+    expect(source).not.toContain(".enqueue('whatsapp.process_message'");
+  });
+
   it('the webhook route file imports no AI provider, orchestration, Mastra, Logicc, or Langdock package', () => {
     const routeFile = join(REPO_ROOT, 'apps/web/src/app/api/v1/webhooks/whatsapp/route.ts');
     const imports = extractImportedModules(readFileSync(routeFile, 'utf-8')).map((m) => m.toLowerCase());

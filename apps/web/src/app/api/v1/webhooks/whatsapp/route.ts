@@ -11,7 +11,7 @@ import { normalizeWhatsAppWebhookEnvelope } from '../../../../../whatsapp/normal
  *
  * SCOPE BOUNDARY (Phase 3A, enforced structurally by this file's imports):
  * This route may only read the raw body, verify the signature, normalize
- * logical events, persist receipt metadata, enqueue record IDs, and return.
+ * logical events, call the atomic ingestion RPC, and return.
  * It has NO import of Mastra, Logicc, Langdock, any AI provider adapter, or
  * any orchestration package -- there is no code path from this file into
  * AI processing. AI draft generation happens nowhere in this route or in
@@ -47,7 +47,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 });
   }
 
-  if (verifyWhatsAppWebhookChallenge(mode, token, expectedVerifyToken)) {
+  if (challenge !== null && verifyWhatsAppWebhookChallenge(mode, token, expectedVerifyToken)) {
     defaultLogger.info('WhatsApp webhook verification succeeded', { requestId, action: 'webhook.verify' });
     return new NextResponse(challenge ?? '', { status: 200 });
   }
@@ -60,9 +60,8 @@ export async function GET(request: Request) {
  * POST /api/v1/webhooks/whatsapp -- inbound event ingestion.
  *
  * Sequence: read raw body -> verify signature -> normalize logical events
- * -> persist receipt metadata (webhook_events, idempotent) -> enqueue
- * record IDs (whatsapp_inbound_v1) -> return. No AI orchestration call
- * exists in this file.
+ * -> call one transactional receipt/staging/enqueue RPC per event -> return.
+ * No direct table write, split enqueue, or AI orchestration call exists here.
  */
 export async function POST(request: Request) {
   const requestId = request.headers.get('x-request-id') || `req-${Date.now()}`;
@@ -102,86 +101,54 @@ export async function POST(request: Request) {
     return NextResponse.json({ received: true, events: 0 });
   }
 
-  const supabase = getAdminClient();
-  const jobQueue = new PgMqJobQueue(supabase);
+  let jobQueue: PgMqJobQueue;
+  try {
+    jobQueue = new PgMqJobQueue(getAdminClient());
+  } catch (error) {
+    defaultLogger.error('WhatsApp webhook ingestion is misconfigured', error as Error, {
+      requestId,
+      action: 'webhook.configuration_error',
+    });
+    return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 });
+  }
 
   let queuedCount = 0;
   let duplicateCount = 0;
+  let ignoredCount = 0;
 
   for (const event of events) {
-    // Resolve the owning organization from the connection's phone_number_id
-    // -- this route is unauthenticated by design (Meta calls it directly),
-    // so tenant resolution happens by connection lookup, never by session.
-    const { data: connectionData, error: connectionError } = await supabase
-      .from('whatsapp_connections')
-      .select('id, organization_id')
-      .eq('phone_number_id', event.phoneNumberId)
-      .maybeSingle();
-
-    const connection = connectionData as unknown as { id: string; organization_id: string } | null;
-
-    if (connectionError || !connection) {
-      defaultLogger.error('WhatsApp webhook event references unknown connection', connectionError ?? undefined, {
+    try {
+      const result = await jobQueue.ingestWhatsAppMessageEvent({
+        phoneNumberId: event.phoneNumberId,
+        providerEventId: event.providerEventId,
+        contactWaId: event.contactWaId,
+        messageType: event.messageType,
+        body: event.body,
+        timestamp: event.timestamp,
         requestId,
-        action: 'webhook.unknown_connection',
       });
-      continue;
-    }
 
-    // Idempotent receipt insert: (provider, provider_event_id) is unique.
-    // A duplicate delivery of the same message.id is a no-op here, not an
-    // error -- and produces no new queue entry.
-    const { data: insertedEventData, error: insertError } = await supabase
-      .from('webhook_events')
-      .insert({
-        organization_id: connection.organization_id,
-        whatsapp_connection_id: connection.id,
-        provider: 'whatsapp',
-        provider_event_id: event.providerEventId,
-        signature_verified: true,
-        status: 'received',
-        contact_wa_id: event.contactWaId,
-        message_type: event.messageType,
-        body_text: event.body,
-        wa_timestamp: event.timestamp,
-      } as never)
-      .select('id')
-      .single();
-
-    if (insertError) {
-      // Unique violation => duplicate delivery, expected and not an error.
-      if ((insertError as { code?: string }).code === '23505') {
+      if (result.outcome === 'queued') {
+        queuedCount += 1;
+      } else if (result.outcome === 'duplicate') {
         duplicateCount += 1;
-        continue;
+      } else {
+        ignoredCount += 1;
+        defaultLogger.error('WhatsApp webhook event references an unknown or inactive connection', undefined, {
+          requestId,
+          action: 'webhook.unknown_connection',
+        });
       }
-      defaultLogger.error('Failed to persist webhook_events receipt', insertError, {
+    } catch (error) {
+      // Return a retryable failure. Any earlier events in this envelope were
+      // committed atomically; Meta's replay will deduplicate them and retry
+      // this event without producing a second receipt or queue item.
+      defaultLogger.error('Atomic WhatsApp webhook ingestion failed', error as Error, {
         requestId,
-        action: 'webhook.receipt_failed',
+        action: 'webhook.ingestion_failed',
       });
-      continue;
+      return NextResponse.json({ error: 'Webhook ingestion temporarily unavailable' }, { status: 503 });
     }
-
-    const insertedEvent = insertedEventData as unknown as { id: string } | null;
-
-    if (!insertedEvent) {
-      defaultLogger.error('webhook_events insert returned no row despite no error', undefined, {
-        requestId,
-        action: 'webhook.receipt_failed',
-      });
-      continue;
-    }
-
-    // Enqueue IDs and correlation metadata ONLY -- no message body, no
-    // token, no phone-number PII, no raw webhook JSON on the queue.
-    await jobQueue.enqueue('whatsapp.process_message', {
-      organizationId: connection.organization_id,
-      requestId,
-      timestamp: new Date().toISOString(),
-      webhookEventId: insertedEvent.id,
-      whatsappConnectionId: connection.id,
-    });
-
-    queuedCount += 1;
   }
 
   defaultLogger.info('WhatsApp webhook processed', {
@@ -189,8 +156,14 @@ export async function POST(request: Request) {
     action: 'webhook.processed',
     queuedCount,
     duplicateCount,
+    ignoredCount,
     totalEvents: events.length,
   });
 
-  return NextResponse.json({ received: true, queued: queuedCount, duplicates: duplicateCount });
+  return NextResponse.json({
+    received: true,
+    queued: queuedCount,
+    duplicates: duplicateCount,
+    ignored: ignoredCount,
+  });
 }

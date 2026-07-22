@@ -1,44 +1,37 @@
-import type { TypedSupabaseClient } from '@tugpt/database';
+import type { TypedSupabaseClient, WhatsAppIngestResult } from '@tugpt/database';
 import type { BaseJobPayload, JobHandler, JobQueueAdapter, JobType } from './types';
 
 /**
- * PgMqJobQueue -- Supabase Queues (pgmq) backed implementation of the
- * existing JobQueueAdapter contract (ADR-007).
+ * Supabase Queues (pgmq) adapter for server-side background work.
  *
- * Decisions fixed for Phase 3 (see docs/status and the Phase 3 plan):
- * - Queue backend is Supabase Queues / pgmq. Redis, BullMQ, and pg-boss are
- *   not used.
- * - The Next.js webhook route may only call `enqueue()` (validate, persist,
- *   enqueue, return). It must never call `poll()` / `ackSuccess()` /
- *   `ackFailure()` -- those belong exclusively to a worker process
- *   (apps/worker), never to a request-handling route. This module does not
- *   enforce that boundary by itself; it is enforced by which processes are
- *   permitted to import from apps/worker (see apps/worker/README.md and the
- *   Phase 3A PR description).
- * - Queue payloads may only ever contain IDs and correlation metadata -- see
- *   WhatsAppInboundJobPayload below. No message body, access token,
- *   phone-number PII, or raw webhook JSON is ever placed on the queue.
- *
- * pgmq itself is not exposed over PostgREST; this class calls the
- * SECURITY DEFINER RPC wrappers added in
- * supabase/migrations/20260721153006_phase3a_webhook_foundation.sql
- * (pgmq_send / pgmq_read / pgmq_archive / pgmq_delete), which are granted to
- * service_role only. A PgMqJobQueue must always be constructed with an
- * admin (service-role) Supabase client -- never the anon/browser client.
+ * Phase 3A has one additional invariant: a WhatsApp receipt and its queue
+ * item must be created atomically. Call ingestWhatsAppMessageEvent() for
+ * inbound WhatsApp work; enqueue('whatsapp.process_message', ...) is rejected
+ * so application code cannot reintroduce a split insert/enqueue path.
  */
 
 export const WHATSAPP_INBOUND_QUEUE = 'whatsapp_inbound_v1' as const;
 
+/** Normalized content passed to the atomic database ingestion RPC. */
+export interface WhatsAppMessageEventInput {
+  phoneNumberId: string;
+  providerEventId: string;
+  contactWaId: string;
+  messageType: string;
+  body: string | null;
+  timestamp: string | null;
+  requestId?: string;
+}
+
 /**
- * The only payload shape enqueued in Phase 3A. Deliberately minimal: IDs
- * and correlation metadata only. Adding a field here that carries message
- * content, a token, or PII would violate the Phase 3A security requirement
- * and must not be done without a documented, reviewed exception.
+ * The complete pgmq payload shape. It contains one authoritative receipt ID
+ * plus non-sensitive correlation metadata. Tenant identity and customer
+ * content are intentionally absent and must be derived inside the worker RPC.
  */
-export interface WhatsAppInboundJobPayload extends BaseJobPayload {
+export interface WhatsAppInboundJobPayload {
   webhookEventId: string;
-  organizationId: string;
-  whatsappConnectionId: string;
+  requestId?: string;
+  timestamp: string;
 }
 
 export interface PgMqReadResult<TPayload> {
@@ -49,14 +42,30 @@ export interface PgMqReadResult<TPayload> {
 }
 
 export interface PgMqJobQueueOptions {
-  /** Visibility timeout in seconds. Proposed default: 60s (see Phase 3 plan). */
   visibilityTimeoutSeconds?: number;
-  /** Max read attempts before a message is moved to failed_jobs and archived. */
   maxAttempts?: number;
 }
 
 const DEFAULT_VISIBILITY_TIMEOUT_SECONDS = 60;
 const DEFAULT_MAX_ATTEMPTS = 5;
+const INGEST_OUTCOMES = new Set(['queued', 'duplicate', 'unknown_connection']);
+
+function parseIngestResult(value: unknown): WhatsAppIngestResult {
+  if (!value || typeof value !== 'object') {
+    throw new Error('ingest_whatsapp_message_event returned an invalid result');
+  }
+
+  const result = value as Partial<WhatsAppIngestResult>;
+  if (!result.outcome || !INGEST_OUTCOMES.has(result.outcome)) {
+    throw new Error('ingest_whatsapp_message_event returned an unknown outcome');
+  }
+
+  return {
+    outcome: result.outcome,
+    webhook_event_id: typeof result.webhook_event_id === 'string' ? result.webhook_event_id : null,
+    pgmq_msg_id: typeof result.pgmq_msg_id === 'string' ? result.pgmq_msg_id : null,
+  };
+}
 
 export class PgMqJobQueue implements JobQueueAdapter {
   private readonly visibilityTimeoutSeconds: number;
@@ -71,15 +80,43 @@ export class PgMqJobQueue implements JobQueueAdapter {
   }
 
   /**
-   * Enqueue a job. This is the ONLY method a Next.js route handler is
-   * permitted to call -- it must not read the queue back or process jobs
-   * inline.
+   * Atomically resolves the registered connection, creates a metadata-only
+   * receipt, stages normalized content, and enqueues the receipt ID.
+   */
+  async ingestWhatsAppMessageEvent(input: WhatsAppMessageEventInput): Promise<WhatsAppIngestResult> {
+    const { data, error } = await this.supabase.rpc(
+      'ingest_whatsapp_message_event',
+      {
+        p_phone_number_id: input.phoneNumberId,
+        p_provider_event_id: input.providerEventId,
+        p_contact_wa_id: input.contactWaId,
+        p_message_type: input.messageType,
+        p_body_text: input.body,
+        p_wa_timestamp: input.timestamp,
+        p_request_id: input.requestId ?? null,
+      } as unknown as undefined
+    );
+
+    if (error) {
+      throw new Error(`Atomic WhatsApp ingestion failed: ${error.message}`);
+    }
+
+    return parseIngestResult(data);
+  }
+
+  /**
+   * Generic enqueue remains available for future job types. WhatsApp inbound
+   * work is rejected here because it must use the atomic ingestion RPC.
    */
   async enqueue<TPayload extends BaseJobPayload>(
     type: JobType,
     payload: TPayload,
     options?: { delayMs?: number; maxAttempts?: number }
   ): Promise<{ jobId: string }> {
+    if (type === 'whatsapp.process_message') {
+      throw new Error('WhatsApp inbound jobs must use ingestWhatsAppMessageEvent()');
+    }
+
     const queueName = this.resolveQueueName(type);
     const delaySeconds = Math.max(0, Math.floor((options?.delayMs ?? 0) / 1000));
 
@@ -99,14 +136,8 @@ export class PgMqJobQueue implements JobQueueAdapter {
     return { jobId: String(data) };
   }
 
-  /**
-   * Read up to `quantity` messages from a queue with the configured
-   * visibility timeout. Worker-only -- never called from a route handler.
-   */
-  async poll<TPayload>(
-    queueName: string,
-    quantity = 1
-  ): Promise<PgMqReadResult<TPayload>[]> {
+  /** Worker-only queue read. */
+  async poll<TPayload>(queueName: string, quantity = 1): Promise<PgMqReadResult<TPayload>[]> {
     const { data, error } = await this.supabase.rpc(
       'pgmq_read',
       {
@@ -135,55 +166,57 @@ export class PgMqJobQueue implements JobQueueAdapter {
     }));
   }
 
-  /**
-   * Archive a message after successful processing. Worker-only.
-   */
+  /** Worker-only archive after successful processing. */
   async ackSuccess(queueName: string, pgmqMsgId: number): Promise<void> {
     const { error } = await this.supabase.rpc(
       'pgmq_archive',
       { p_queue_name: queueName, p_msg_id: pgmqMsgId } as unknown as undefined
     );
+
     if (error) {
       throw new Error(`PgMqJobQueue.ackSuccess failed for queue "${queueName}" msg ${pgmqMsgId}: ${error.message}`);
     }
   }
 
   /**
-   * Called by the worker when a message has exhausted `maxAttempts`. Writes
-   * a failed_jobs record and archives the message out of the active queue
-   * (never deletes it outright, per the Phase 3A requirement for a
-   * dead-letter record).
+   * Leaves a job visible for retry until maxAttempts, then atomically creates
+   * the narrow failed_jobs row and archives the pgmq item. Only the receipt ID
+   * is forwarded; no queue payload copy or tenant claim is persisted.
    */
   async ackFailure(
     queueName: string,
     pgmqMsgId: number,
     readCount: number,
-    payload: unknown,
-    error: string,
-    organizationId?: string
+    payload: WhatsAppInboundJobPayload,
+    error: string
   ): Promise<{ deadLettered: boolean }> {
     if (readCount < this.maxAttempts) {
-      // Let the visibility timeout expire naturally for a retry -- do not
-      // archive, do not delete.
       return { deadLettered: false };
     }
 
-    const { error: insertError } = await this.supabase
-      .from('failed_jobs')
-      .insert({
-        organization_id: organizationId ?? null,
-        queue_name: queueName,
-        pgmq_msg_id: pgmqMsgId,
-        payload: payload as never,
-        error,
-        attempts: readCount,
-      } as never);
-
-    if (insertError) {
-      throw new Error(`PgMqJobQueue.ackFailure could not write failed_jobs record: ${insertError.message}`);
+    if (!payload || typeof payload.webhookEventId !== 'string' || payload.webhookEventId.length === 0) {
+      throw new Error('Cannot dead-letter a WhatsApp job without a webhookEventId');
     }
 
-    await this.ackSuccess(queueName, pgmqMsgId); // archive out of the active queue
+    const { data, error: rpcError } = await this.supabase.rpc(
+      'dead_letter_job',
+      {
+        p_queue_name: queueName,
+        p_pgmq_msg_id: pgmqMsgId,
+        p_webhook_event_id: payload.webhookEventId,
+        p_error: error,
+        p_attempts: readCount,
+      } as unknown as undefined
+    );
+
+    if (rpcError) {
+      throw new Error(`PgMqJobQueue.ackFailure could not atomically dead-letter the job: ${rpcError.message}`);
+    }
+
+    if (data !== true) {
+      throw new Error('PgMqJobQueue.ackFailure received an invalid dead-letter result');
+    }
+
     return { deadLettered: true };
   }
 
@@ -192,27 +225,10 @@ export class PgMqJobQueue implements JobQueueAdapter {
   }
 
   private resolveQueueName(type: JobType): string {
-    if (type === 'whatsapp.process_message') {
-      return WHATSAPP_INBOUND_QUEUE;
-    }
-    // Phase 3A introduces exactly one queue. Other job types fall back to a
-    // type-derived queue name so the adapter remains usable for future job
-    // types without a schema change -- but no such queue is provisioned by
-    // Phase 3A, and enqueueing to one would fail loudly (pgmq.send raises if
-    // the queue does not exist), which is the desired behavior over silent
-    // misrouting.
     return type.replace(/\./g, '_');
   }
 }
 
-/**
- * Handler registry kept for interface parity with InMemoryJobQueue. Not
- * used by the webhook route (which only calls enqueue()) or by the worker
- * in Phase 3A (which implements its own loop against the same RPC surface
- * directly via PgMqJobQueue.poll/ackSuccess/ackFailure, not via a
- * registered handler map) -- included so a future slice can adopt the same
- * `registerHandler` shape as InMemoryJobQueue if useful.
- */
 export class PgMqHandlerRegistry {
   private handlers: Map<JobType, JobHandler> = new Map();
 

@@ -3,141 +3,80 @@ import { processWhatsAppInboundJob } from './whatsapp-inbound-processor';
 import type { WhatsAppInboundJobPayload } from '@tugpt/jobs';
 import type { TypedSupabaseClient } from '@tugpt/database';
 
-interface FakeReceipt {
-  id: string;
-  signature_verified: boolean;
-  status: string;
-  contact_wa_id: string | null;
-  provider_event_id: string;
-  body_text: string | null;
-}
-
-function createFakeSupabase(receipt: FakeReceipt) {
-  const conversations = new Map<string, { id: string }>();
-  const messages: Array<{ wa_message_id: string | null; whatsapp_connection_id: string }> = [];
-  let conversationCounter = 0;
-  let receiptStatus = receipt.status;
-
-  const client = {
-    from: vi.fn().mockImplementation((table: string) => {
-      if (table === 'webhook_events') {
-        return {
-          select: vi.fn().mockReturnThis(),
-          eq: vi.fn().mockReturnThis(),
-          single: vi.fn().mockResolvedValue({ data: { ...receipt, status: receiptStatus }, error: null }),
-          update: vi.fn().mockImplementation((patch: { status: string }) => {
-            receiptStatus = patch.status;
-            return { eq: vi.fn().mockResolvedValue({ error: null }) };
-          }),
-        };
-      }
-      if (table === 'conversations') {
-        return {
-          upsert: vi.fn().mockImplementation((row: { whatsapp_connection_id: string; contact_wa_id: string }) => {
-            const key = `${row.whatsapp_connection_id}:${row.contact_wa_id}`;
-            if (!conversations.has(key)) {
-              conversationCounter += 1;
-              conversations.set(key, { id: `conv-${conversationCounter}` });
-            }
-            const conv = conversations.get(key)!;
-            return {
-              select: vi.fn().mockReturnThis(),
-              single: vi.fn().mockResolvedValue({ data: conv, error: null }),
-            };
-          }),
-        };
-      }
-      if (table === 'messages') {
-        return {
-          insert: vi.fn().mockImplementation((row: { wa_message_id: string | null; whatsapp_connection_id: string }) => {
-            const isDuplicate = messages.some(
-              (m) => m.wa_message_id === row.wa_message_id && m.whatsapp_connection_id === row.whatsapp_connection_id
-            );
-            if (isDuplicate) {
-              return Promise.resolve({ error: { code: '23505', message: 'duplicate key' } });
-            }
-            messages.push(row);
-            return Promise.resolve({ error: null });
-          }),
-        };
-      }
-      return {};
-    }),
-  } as unknown as TypedSupabaseClient;
-
-  return { client, messages, getReceiptStatus: () => receiptStatus };
-}
-
-function payload(overrides: Partial<WhatsAppInboundJobPayload> = {}): WhatsAppInboundJobPayload {
+function payload(): WhatsAppInboundJobPayload {
   return {
-    organizationId: 'org-1',
     requestId: 'req-1',
-    timestamp: new Date().toISOString(),
+    timestamp: '2026-01-01T00:00:00Z',
     webhookEventId: 'receipt-1',
-    whatsappConnectionId: 'conn-1',
-    ...overrides,
   };
 }
 
+function clientWithRpc(data: unknown, error: unknown = null) {
+  const rpc = vi.fn().mockResolvedValue({ data, error });
+  const from = vi.fn(() => {
+    throw new Error('processor must not issue direct table queries');
+  });
+  return { client: { rpc, from } as unknown as TypedSupabaseClient, rpc, from };
+}
+
 describe('processWhatsAppInboundJob', () => {
-  it('persists exactly one message and marks the receipt processed', async () => {
-    const { client, messages, getReceiptStatus } = createFakeSupabase({
-      id: 'receipt-1',
-      signature_verified: true,
-      status: 'received',
-      contact_wa_id: 'contact-1',
-      provider_event_id: 'wamid.1',
-      body_text: 'hi',
+  it('passes only the receipt ID to the atomic processing RPC', async () => {
+    const { client, rpc, from } = clientWithRpc({
+      outcome: 'processed',
+      conversation_id: 'conversation-1',
+      message_created: true,
     });
 
-    await processWhatsAppInboundJob(client, payload());
+    await expect(processWhatsAppInboundJob(client, payload())).resolves.toBe('processed');
 
-    expect(messages).toHaveLength(1);
-    expect(getReceiptStatus()).toBe('processed');
+    expect(rpc).toHaveBeenCalledWith('process_whatsapp_inbound_receipt', {
+      p_webhook_event_id: 'receipt-1',
+    });
+    expect(from).not.toHaveBeenCalled();
   });
 
-  it('is idempotent under worker redelivery -- only one message exists after duplicate processing', async () => {
-    const { client, messages } = createFakeSupabase({
-      id: 'receipt-1',
-      signature_verified: true,
-      status: 'received',
-      contact_wa_id: 'contact-1',
-      provider_event_id: 'wamid.1',
-      body_text: 'hi',
-    });
+  it('ignores forged tenant fields if a hostile queue payload contains extras', async () => {
+    const { client, rpc } = clientWithRpc({ outcome: 'processed' });
+    const hostilePayload = {
+      ...payload(),
+      organizationId: 'forged-org',
+      whatsappConnectionId: 'forged-connection',
+      body: 'forged body',
+    } as WhatsAppInboundJobPayload;
 
-    await processWhatsAppInboundJob(client, payload());
-    // Simulate pgmq at-least-once redelivery of the same job.
-    await processWhatsAppInboundJob(client, payload());
+    await processWhatsAppInboundJob(client, hostilePayload);
 
-    expect(messages).toHaveLength(1);
+    const args = rpc.mock.calls[0][1] as Record<string, unknown>;
+    expect(args).toEqual({ p_webhook_event_id: 'receipt-1' });
+    expect(args).not.toHaveProperty('organizationId');
+    expect(args).not.toHaveProperty('whatsappConnectionId');
+    expect(args).not.toHaveProperty('body');
   });
 
-  it('is a no-op when the receipt was already marked processed by an earlier delivery', async () => {
-    const { client, messages } = createFakeSupabase({
-      id: 'receipt-1',
-      signature_verified: true,
-      status: 'processed',
-      contact_wa_id: 'contact-1',
-      provider_event_id: 'wamid.1',
-      body_text: 'hi',
-    });
+  it('treats an already-processed receipt as an idempotent success', async () => {
+    const { client } = clientWithRpc({ outcome: 'already_processed' });
 
-    await processWhatsAppInboundJob(client, payload());
-
-    expect(messages).toHaveLength(0);
+    await expect(processWhatsAppInboundJob(client, payload())).resolves.toBe('already_processed');
   });
 
-  it('refuses to process a receipt that is not signature-verified', async () => {
-    const { client } = createFakeSupabase({
-      id: 'receipt-1',
-      signature_verified: false,
-      status: 'received',
-      contact_wa_id: 'contact-1',
-      provider_event_id: 'wamid.1',
-      body_text: 'hi',
-    });
+  it('propagates RPC failures to the worker retry/dead-letter path', async () => {
+    const { client } = clientWithRpc(null, { message: 'staging row missing' });
 
-    await expect(processWhatsAppInboundJob(client, payload())).rejects.toThrow(/unverified/i);
+    await expect(processWhatsAppInboundJob(client, payload())).rejects.toThrow(/staging row missing/);
+  });
+
+  it('rejects an unknown RPC result instead of acknowledging the job', async () => {
+    const { client } = clientWithRpc({ outcome: 'unexpected' });
+
+    await expect(processWhatsAppInboundJob(client, payload())).rejects.toThrow(/unknown outcome/);
+  });
+
+  it('rejects a payload with no receipt ID before calling the database', async () => {
+    const { client, rpc } = clientWithRpc({ outcome: 'processed' });
+
+    await expect(
+      processWhatsAppInboundJob(client, { timestamp: '2026-01-01T00:00:00Z' } as WhatsAppInboundJobPayload)
+    ).rejects.toThrow(/missing webhookEventId/);
+    expect(rpc).not.toHaveBeenCalled();
   });
 });

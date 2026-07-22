@@ -6,18 +6,20 @@ permitted consumer of the `whatsapp_inbound_v1` Supabase Queue (pgmq).
 ## Execution boundary (do not violate)
 
 - `apps/web`'s webhook route (`/api/v1/webhooks/whatsapp`) may only
-  **enqueue** (`PgMqJobQueue.enqueue`). It must never call `poll()`,
-  `ackSuccess()`, or `ackFailure()` -- those exist only for this worker
-  process.
+  call the atomic `PgMqJobQueue.ingestWhatsAppMessageEvent()` boundary. It
+  must never insert receipts directly, call the legacy generic `enqueue()`
+  path for WhatsApp, or call `poll()`, `ackSuccess()`, or `ackFailure()`.
 - This worker may never generate an AI reply, call Mastra, Logicc,
   Langdock, OpenAI, or any provider adapter. It stops at persisting the
   inbound conversation/message and marking the webhook receipt processed.
   See `docs/adr/ADR-011-orchestration-runtime-and-provider-selection.md`
   for where AI orchestration is planned to live in a later Phase 3 slice --
   not here.
-- Queue payloads it reads and produces contain only IDs and correlation
-  metadata (`WhatsAppInboundJobPayload`). It must never write a message
-  body, access token, phone-number PII, or raw webhook JSON onto the queue.
+- Queue payloads contain only `webhookEventId` and correlation metadata
+  (`WhatsAppInboundJobPayload`). Tenant identity is derived from the locked
+  receipt inside `process_whatsapp_inbound_receipt`; queue-supplied tenant
+  claims are never trusted. Message bodies, access tokens, phone-number PII,
+  and raw webhook JSON must never be placed on the queue.
 
 ## Running locally
 

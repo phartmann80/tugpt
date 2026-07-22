@@ -8,52 +8,19 @@ function sign(body: string): string {
   return 'sha256=' + createHmac('sha256', APP_SECRET).update(body).digest('hex');
 }
 
-const { mockEnqueue } = vi.hoisted(() => ({ mockEnqueue: vi.fn().mockResolvedValue({ jobId: '1' }) }));
+const { mockIngest, mockCreateAdmin } = vi.hoisted(() => ({
+  mockIngest: vi.fn(),
+  mockCreateAdmin: vi.fn(() => ({ rpc: vi.fn() })),
+}));
 
 vi.mock('@tugpt/jobs', () => ({
   PgMqJobQueue: vi.fn().mockImplementation(function PgMqJobQueue() {
-    return { enqueue: mockEnqueue };
+    return { ingestWhatsAppMessageEvent: mockIngest };
   }),
 }));
 
-type ConnectionRow = { id: string; organization_id: string };
-
-let connectionRow: ConnectionRow | null;
-let insertShouldConflict: boolean;
-const insertedReceipts: unknown[] = [];
-
-const mockAdminClient = {
-  from: vi.fn().mockImplementation((table: string) => {
-    if (table === 'whatsapp_connections') {
-      return {
-        select: vi.fn().mockReturnThis(),
-        eq: vi.fn().mockReturnThis(),
-        maybeSingle: vi.fn().mockResolvedValue({ data: connectionRow, error: null }),
-      };
-    }
-    if (table === 'webhook_events') {
-      return {
-        insert: vi.fn().mockImplementation((row: unknown) => {
-          if (insertShouldConflict) {
-            return {
-              select: vi.fn().mockReturnThis(),
-              single: vi.fn().mockResolvedValue({ data: null, error: { code: '23505', message: 'duplicate key' } }),
-            };
-          }
-          insertedReceipts.push(row);
-          return {
-            select: vi.fn().mockReturnThis(),
-            single: vi.fn().mockResolvedValue({ data: { id: `receipt-${insertedReceipts.length}` }, error: null }),
-          };
-        }),
-      };
-    }
-    return {};
-  }),
-};
-
 vi.mock('@tugpt/database', () => ({
-  createAdminSupabaseClient: vi.fn(() => mockAdminClient),
+  createAdminSupabaseClient: mockCreateAdmin,
 }));
 
 function messageEnvelope(messageId: string, phoneNumberId = 'pn-1', waId = 'contact-1'): string {
@@ -67,12 +34,20 @@ function messageEnvelope(messageId: string, phoneNumberId = 'pn-1', waId = 'cont
             field: 'messages',
             value: {
               metadata: { phone_number_id: phoneNumberId },
-              messages: [{ id: messageId, from: waId, type: 'text', text: { body: 'hello' } }],
+              messages: [{ id: messageId, from: waId, timestamp: '1700000000', type: 'text', text: { body: 'hello' } }],
             },
           },
         ],
       },
     ],
+  });
+}
+
+function postRequest(body: string, signature = sign(body)): Request {
+  return new Request('http://localhost/api/v1/webhooks/whatsapp', {
+    method: 'POST',
+    headers: { 'x-hub-signature-256': signature, 'x-request-id': 'req-test' },
+    body,
   });
 }
 
@@ -82,23 +57,34 @@ describe('GET /api/v1/webhooks/whatsapp', () => {
     vi.resetModules();
   });
 
-  it('succeeds with the correct verify token and echoes the challenge', async () => {
+  it('echoes the challenge for the correct verification token', async () => {
     const { GET } = await import('./route');
     const req = new Request(
       `http://localhost/api/v1/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=${VERIFY_TOKEN}&hub.challenge=echo-me`
     );
+
     const res = await GET(req);
+
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('echo-me');
   });
 
-  it('fails with an incorrect verify token', async () => {
+  it('rejects an incorrect verification token', async () => {
     const { GET } = await import('./route');
     const req = new Request(
       'http://localhost/api/v1/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=echo-me'
     );
-    const res = await GET(req);
-    expect(res.status).toBe(403);
+
+    expect((await GET(req)).status).toBe(403);
+  });
+
+  it('rejects a handshake with no challenge', async () => {
+    const { GET } = await import('./route');
+    const req = new Request(
+      `http://localhost/api/v1/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=${VERIFY_TOKEN}`
+    );
+
+    expect((await GET(req)).status).toBe(403);
   });
 });
 
@@ -107,75 +93,77 @@ describe('POST /api/v1/webhooks/whatsapp', () => {
     process.env.WHATSAPP_APP_SECRET = APP_SECRET;
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'http://localhost:56321';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
-    connectionRow = { id: 'conn-1', organization_id: 'org-1' };
-    insertShouldConflict = false;
-    insertedReceipts.length = 0;
-    mockEnqueue.mockClear();
+    mockIngest.mockReset();
+    mockIngest.mockResolvedValue({ outcome: 'queued', webhook_event_id: 'receipt-1', pgmq_msg_id: '1' });
+    mockCreateAdmin.mockClear();
+    vi.resetModules();
   });
 
   afterEach(() => {
     vi.resetModules();
   });
 
-  it('returns 401 for an invalid signature', async () => {
+  it('returns 401 for an invalid signature without touching ingestion', async () => {
     const { POST } = await import('./route');
     const body = messageEnvelope('wamid.1');
-    const req = new Request('http://localhost/api/v1/webhooks/whatsapp', {
-      method: 'POST',
-      headers: { 'x-hub-signature-256': 'sha256=invalid' },
-      body,
-    });
-    const res = await POST(req);
+
+    const res = await POST(postRequest(body, 'sha256=invalid'));
+
     expect(res.status).toBe(401);
-    expect(insertedReceipts).toHaveLength(0);
-    expect(mockEnqueue).not.toHaveBeenCalled();
+    expect(mockIngest).not.toHaveBeenCalled();
+    expect(mockCreateAdmin).not.toHaveBeenCalled();
   });
 
-  it('creates exactly one receipt and one queue entry for a valid delivery', async () => {
+  it('calls one atomic ingestion operation for a valid delivery', async () => {
     const { POST } = await import('./route');
     const body = messageEnvelope('wamid.1');
-    const req = new Request('http://localhost/api/v1/webhooks/whatsapp', {
-      method: 'POST',
-      headers: { 'x-hub-signature-256': sign(body) },
-      body,
-    });
-    const res = await POST(req);
+
+    const res = await POST(postRequest(body));
     const json = await res.json();
 
     expect(res.status).toBe(200);
-    expect(json.queued).toBe(1);
-    expect(insertedReceipts).toHaveLength(1);
-    expect(mockEnqueue).toHaveBeenCalledTimes(1);
+    expect(json).toMatchObject({ queued: 1, duplicates: 0, ignored: 0 });
+    expect(mockIngest).toHaveBeenCalledTimes(1);
+    expect(mockIngest).toHaveBeenCalledWith({
+      phoneNumberId: 'pn-1',
+      providerEventId: 'wamid.1',
+      contactWaId: 'contact-1',
+      messageType: 'text',
+      body: 'hello',
+      timestamp: '1700000000',
+      requestId: 'req-test',
+    });
   });
 
-  it('produces no duplicate receipt or queue entry for a repeated delivery', async () => {
+  it('does not pass the raw envelope to the atomic ingestion method', async () => {
     const { POST } = await import('./route');
     const body = messageEnvelope('wamid.1');
 
-    const req1 = new Request('http://localhost/api/v1/webhooks/whatsapp', {
-      method: 'POST',
-      headers: { 'x-hub-signature-256': sign(body) },
-      body,
-    });
-    await POST(req1);
+    await POST(postRequest(body));
 
-    insertShouldConflict = true;
-
-    const req2 = new Request('http://localhost/api/v1/webhooks/whatsapp', {
-      method: 'POST',
-      headers: { 'x-hub-signature-256': sign(body) },
-      body,
-    });
-    const res2 = await POST(req2);
-    const json2 = await res2.json();
-
-    expect(res2.status).toBe(200);
-    expect(json2.duplicates).toBe(1);
-    expect(json2.queued).toBe(0);
-    expect(mockEnqueue).toHaveBeenCalledTimes(1); // only from the first delivery
+    const input = mockIngest.mock.calls[0][0] as Record<string, unknown>;
+    expect(input).not.toHaveProperty('raw');
+    expect(input).not.toHaveProperty('rawBody');
+    expect(input).not.toHaveProperty('entry');
+    expect(JSON.stringify(input)).not.toContain('waba-1');
   });
 
-  it('normalizes multiple logical events in one envelope independently', async () => {
+  it('reports a database-detected replay as a duplicate without queueing again', async () => {
+    mockIngest.mockResolvedValue({ outcome: 'duplicate', webhook_event_id: 'receipt-1', pgmq_msg_id: null });
+    const { POST } = await import('./route');
+
+    const res = await POST(postRequest(messageEnvelope('wamid.1')));
+
+    expect(await res.json()).toMatchObject({ queued: 0, duplicates: 1, ignored: 0 });
+    expect(mockIngest).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes and ingests multiple logical events independently', async () => {
+    mockIngest.mockImplementation(async (input: { providerEventId: string }) => ({
+      outcome: input.providerEventId === 'wamid.2' ? 'duplicate' : 'queued',
+      webhook_event_id: `receipt-${input.providerEventId}`,
+      pgmq_msg_id: input.providerEventId === 'wamid.2' ? null : '1',
+    }));
     const { POST } = await import('./route');
     const body = JSON.stringify({
       object: 'whatsapp_business_account',
@@ -198,73 +186,43 @@ describe('POST /api/v1/webhooks/whatsapp', () => {
       ],
     });
 
-    const req = new Request('http://localhost/api/v1/webhooks/whatsapp', {
-      method: 'POST',
-      headers: { 'x-hub-signature-256': sign(body) },
-      body,
-    });
-    const res = await POST(req);
-    const json = await res.json();
+    const res = await POST(postRequest(body));
 
-    expect(json.queued).toBe(2);
-    expect(insertedReceipts).toHaveLength(2);
-    expect(mockEnqueue).toHaveBeenCalledTimes(2);
+    expect(await res.json()).toMatchObject({ queued: 1, duplicates: 1, ignored: 0 });
+    expect(mockIngest).toHaveBeenCalledTimes(2);
   });
 
-  it('blocks writes for an event referencing an unknown connection (cross-tenant / unregistered number)', async () => {
-    connectionRow = null;
+  it('acknowledges an unregistered or inactive connection without writing a receipt', async () => {
+    mockIngest.mockResolvedValue({ outcome: 'unknown_connection', webhook_event_id: null, pgmq_msg_id: null });
     const { POST } = await import('./route');
-    const body = messageEnvelope('wamid.1', 'unknown-phone-number-id');
-    const req = new Request('http://localhost/api/v1/webhooks/whatsapp', {
-      method: 'POST',
-      headers: { 'x-hub-signature-256': sign(body) },
-      body,
-    });
-    const res = await POST(req);
-    const json = await res.json();
 
-    expect(json.queued).toBe(0);
-    expect(insertedReceipts).toHaveLength(0);
-    expect(mockEnqueue).not.toHaveBeenCalled();
+    const res = await POST(postRequest(messageEnvelope('wamid.1', 'unknown-phone-number-id')));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ queued: 0, duplicates: 0, ignored: 1 });
   });
 
-  it('never places message body or PII on the enqueued payload', async () => {
+  it('returns a retryable 503 when atomic ingestion fails', async () => {
+    mockIngest.mockRejectedValue(new Error('pgmq unavailable'));
     const { POST } = await import('./route');
-    const body = messageEnvelope('wamid.1');
-    const req = new Request('http://localhost/api/v1/webhooks/whatsapp', {
-      method: 'POST',
-      headers: { 'x-hub-signature-256': sign(body) },
-      body,
-    });
-    await POST(req);
 
-    expect(mockEnqueue).toHaveBeenCalledTimes(1);
-    const [, payload] = mockEnqueue.mock.calls[0];
-    const keys = Object.keys(payload);
+    const res = await POST(postRequest(messageEnvelope('wamid.1')));
 
-    expect(keys).toEqual(
-      expect.arrayContaining(['organizationId', 'requestId', 'timestamp', 'webhookEventId', 'whatsappConnectionId'])
-    );
-    expect(JSON.stringify(payload)).not.toContain('hello'); // message body text
-    expect(JSON.stringify(payload)).not.toContain('contact-1'); // WhatsApp contact ID (PII)
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'Webhook ingestion temporarily unavailable' });
   });
 
-  it('persists no raw webhook payload -- only normalized fields', async () => {
+  it('acknowledges a valid non-message webhook without opening the database', async () => {
     const { POST } = await import('./route');
-    const body = messageEnvelope('wamid.1');
-    const req = new Request('http://localhost/api/v1/webhooks/whatsapp', {
-      method: 'POST',
-      headers: { 'x-hub-signature-256': sign(body) },
-      body,
+    const body = JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ field: 'message_template_status_update', value: {} }] }],
     });
-    await POST(req);
 
-    expect(insertedReceipts).toHaveLength(1);
-    const receipt = insertedReceipts[0] as Record<string, unknown>;
-    const keys = Object.keys(receipt);
+    const res = await POST(postRequest(body));
 
-    expect(keys).not.toContain('raw_payload');
-    expect(keys).not.toContain('raw');
-    expect(keys).not.toContain('entry');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ received: true, events: 0 });
+    expect(mockCreateAdmin).not.toHaveBeenCalled();
   });
 });

@@ -4,8 +4,10 @@ Branch: `feature/phase3a-webhook-foundation`
 
 ## Scope built in this PR
 
-Webhook signature verification, event normalization, replay-protected
-receipt ledger, PgMqJobQueue, and a dedicated worker.
+Webhook signature verification, event normalization, metadata-only
+replay-protected receipts, server-only content staging, atomic
+receipt/staging/pgmq ingestion, receipt-derived tenant processing, atomic
+dead-lettering, PgMqJobQueue, and a dedicated worker.
 No AI draft generation, no live provider calls, no outbound WhatsApp
 sending, no dashboard UI, no billing, no ai_usage_events, no real secrets
 backend, per the authorized scope.
@@ -16,7 +18,7 @@ backend, per the authorized scope.
 |---|---|---|
 | lint --force | 0 | 9/9 |
 | typecheck --force | 0 | 9/9 |
-| test --force | 0 | 9/9, 85 JS/TS assertions |
+| test --force | 0 | 7/7 packages with tests, 95 JS/TS assertions |
 | build --force | 0 | 1/1 (web) |
 
 All commands were force-executed, not served from Turbo cache.
@@ -27,21 +29,24 @@ This sandbox has no Docker access. The new suite was not executed here.
 
 ```text
 File: supabase/tests/database/webhook_foundation_rls.test.sql
-plan(14), 14 assertions counted -- matches exactly
+plan(47), 47 assertions counted -- matches exactly
 
 Existing suites, unmodified by this PR:
 supabase/tests/database/invitations_and_ownership.test.sql -- plan(10), 10 assertions
 supabase/tests/database/rls_adversarial.test.sql -- plan(35), 35 assertions
 
-Combined total after this PR: 59 pgTAP assertions across 3 files.
+Combined total after this PR: 92 pgTAP assertions across 3 files.
 ```
 
 ## Coverage of the new suite
 
-RLS isolation across all 5 new tables, replay-protection uniqueness on
-webhook_events, idempotency uniqueness on messages, cross-tenant write
-blocking on business_profiles, whatsapp_connections, conversations, and
-messages, and an explicit check that RLS is enabled on all 5 tables.
+RLS/FORCE RLS across all 7 new tables; explicit client denial for the 3
+server-only tables and RPCs; metadata/PII column separation; authoritative
+connection-to-tenant resolution; atomic receipt/staging/queue ingestion;
+replay protection; minimal queue payload; atomic worker persistence;
+conversation escalation-state preservation; idempotent worker redelivery;
+client-visible tenant isolation; atomic dead-letter persistence/archive; and
+rejection of tampered cross-tenant staging identity.
 
 ## Commands for Paul's Windows machine
 

@@ -72,6 +72,21 @@ export type WebhookEventStatus = 'received' | 'processed' | 'failed';
 export type ConversationStatus = 'open' | 'needs_human' | 'closed';
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageStatus = 'received' | 'draft' | 'sent' | 'failed';
+export type WhatsAppIngestOutcome = 'queued' | 'duplicate' | 'unknown_connection';
+export type WhatsAppProcessOutcome = 'processed' | 'already_processed';
+
+export interface WhatsAppIngestResult {
+  outcome: WhatsAppIngestOutcome;
+  webhook_event_id: string | null;
+  /** bigint is serialized as text so JavaScript never loses precision. */
+  pgmq_msg_id: string | null;
+}
+
+export interface WhatsAppProcessResult {
+  outcome: WhatsAppProcessOutcome;
+  conversation_id?: string;
+  message_created?: boolean;
+}
 
 export interface BusinessProfile {
   id: string;
@@ -105,14 +120,22 @@ export interface WebhookEvent {
   whatsapp_connection_id: string | null;
   provider: string;
   provider_event_id: string;
+  event_kind: string;
   signature_verified: boolean;
   status: WebhookEventStatus;
-  contact_wa_id: string | null;
-  message_type: string | null;
-  body_text: string | null;
-  wa_timestamp: string | null;
   received_at: string;
   processed_at: string | null;
+}
+
+export interface InboundMessageStaging {
+  webhook_event_id: string;
+  organization_id: string;
+  whatsapp_connection_id: string;
+  contact_wa_id: string;
+  message_type: string;
+  body_text: string | null;
+  wa_timestamp: string | null;
+  created_at: string;
 }
 
 export interface Conversation {
@@ -141,11 +164,10 @@ export interface Message {
 
 export interface FailedJob {
   id: string;
-  organization_id: string | null;
+  webhook_event_id: string;
   queue_name: string;
-  pgmq_msg_id: number | null;
-  payload: Record<string, unknown>;
-  error: string | null;
+  pgmq_msg_id: number;
+  error: string;
   attempts: number;
   created_at: string;
 }
@@ -197,6 +219,11 @@ export interface Database {
         Row: WebhookEvent;
         Insert: Omit<WebhookEvent, 'id' | 'received_at'> & { id?: string; received_at?: string };
         Update: Partial<WebhookEvent>;
+      };
+      inbound_message_staging: {
+        Row: InboundMessageStaging;
+        Insert: Omit<InboundMessageStaging, 'created_at'> & { created_at?: string };
+        Update: Partial<InboundMessageStaging>;
       };
       conversations: {
         Row: Conversation;
@@ -259,6 +286,34 @@ export interface Database {
         Args: {
           p_queue_name: string;
           p_msg_id: number;
+        };
+        Returns: boolean;
+      };
+      ingest_whatsapp_message_event: {
+        Args: {
+          p_phone_number_id: string;
+          p_provider_event_id: string;
+          p_contact_wa_id: string;
+          p_message_type: string;
+          p_body_text?: string | null;
+          p_wa_timestamp?: string | null;
+          p_request_id?: string | null;
+        };
+        Returns: WhatsAppIngestResult;
+      };
+      process_whatsapp_inbound_receipt: {
+        Args: {
+          p_webhook_event_id: string;
+        };
+        Returns: WhatsAppProcessResult;
+      };
+      dead_letter_job: {
+        Args: {
+          p_queue_name: string;
+          p_pgmq_msg_id: number;
+          p_webhook_event_id: string;
+          p_error: string;
+          p_attempts: number;
         };
         Returns: boolean;
       };

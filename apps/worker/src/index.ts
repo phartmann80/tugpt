@@ -1,6 +1,6 @@
 import { createAdminSupabaseClient } from '@tugpt/database';
 import { defaultLogger } from '@tugpt/observability';
-import { WHATSAPP_INBOUND_QUEUE } from '@tugpt/jobs';
+import { WHATSAPP_INBOUND_QUEUE, type WhatsAppInboundJobPayload } from '@tugpt/jobs';
 import { processWhatsAppInboundJob } from './whatsapp-inbound-processor';
 import { PgMqJobQueue } from '@tugpt/jobs';
 
@@ -10,10 +10,9 @@ import { PgMqJobQueue } from '@tugpt/jobs';
  * This process, not any Next.js route, is the ONLY code path permitted to
  * consume the whatsapp_inbound_v1 queue. It:
  *   1. polls the queue for a batch of messages,
- *   2. loads the verified webhook_events receipt referenced by each
- *      message's IDs,
- *   3. persists the inbound conversation/message deterministically,
- *   4. marks the receipt processed,
+ *   2. passes only the receipt ID to the atomic processing RPC,
+ *   3. lets the database derive tenancy and persist the message,
+ *   4. marks the receipt processed without resetting conversation state,
  *   5. archives the queue item.
  *
  * It does NOT generate an AI reply in Phase 3A -- there is no import of any
@@ -34,11 +33,11 @@ function getAdminClient() {
 }
 
 export async function runOnce(queue: PgMqJobQueue, supabase: ReturnType<typeof createAdminSupabaseClient>) {
-  const messages = await queue.poll(WHATSAPP_INBOUND_QUEUE, POLL_BATCH_SIZE);
+  const messages = await queue.poll<WhatsAppInboundJobPayload>(WHATSAPP_INBOUND_QUEUE, POLL_BATCH_SIZE);
 
   for (const msg of messages) {
     try {
-      await processWhatsAppInboundJob(supabase, msg.payload as never);
+      await processWhatsAppInboundJob(supabase, msg.payload);
       await queue.ackSuccess(WHATSAPP_INBOUND_QUEUE, msg.pgmqMsgId);
     } catch (err) {
       const error = err as Error;

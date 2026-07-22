@@ -19,9 +19,9 @@ export interface NormalizedWhatsAppEvent {
   phoneNumberId: string;
   displayPhoneNumber: string | null;
   contactWaId: string;
-  /** Present only long enough to compute a conversation key -- never persisted verbatim into webhook_events. */
+  /** Stored only in the server-only staging row, never in webhook_events or pgmq. */
   messageType: string;
-  /** Message body text, if any. Carried only as far as message persistence in apps/worker -- never placed on the queue. */
+  /** Stored temporarily in server-only staging until the worker RPC commits the message; never placed on the queue. */
   body: string | null;
   timestamp: string | null;
 }
