@@ -1,19 +1,93 @@
 import type { AIProviderAdapter } from './adapter';
-import { LangdockAdapter, type LangdockConfig } from './langdock';
-import { MastraAdapter, type MastraConfig } from './mastra';
-import { OpenAIAdapter, type OpenAIConfig } from './openai';
+import { LangdockAdapter } from './langdock';
+import { LogiccAdapter } from './logicc';
+import { OpenAIAdapter } from './openai';
 
-export type ProviderType = 'langdock' | 'mastra' | 'openai';
+export type ProviderType = 'logicc' | 'langdock' | 'openai';
+export type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
 
-export interface ProviderFactoryConfig {
-  langdock?: LangdockConfig;
-  mastra?: MastraConfig;
-  openai?: OpenAIConfig;
+export interface ProviderSelection {
+  readonly primary: ProviderType;
+  readonly fallback?: ProviderType;
+}
+
+const PROVIDER_TYPES = new Set<ProviderType>(['logicc', 'langdock', 'openai']);
+
+export class ProviderSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderSelectionError';
+  }
+}
+
+function parseProvider(value: string | undefined, variableName: string): ProviderType {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || !PROVIDER_TYPES.has(normalized as ProviderType)) {
+    throw new ProviderSelectionError(
+      `${variableName} must explicitly name one of: ${[...PROVIDER_TYPES].join(', ')}`
+    );
+  }
+  return normalized as ProviderType;
+}
+
+export function parseProviderSelection(environment: ProviderEnvironment): ProviderSelection {
+  const primary = parseProvider(
+    environment.AI_TEXT_PRIMARY_PROVIDER,
+    'AI_TEXT_PRIMARY_PROVIDER'
+  );
+  const fallbackValue = environment.AI_TEXT_FALLBACK_PROVIDER?.trim();
+  const fallback = fallbackValue
+    ? parseProvider(fallbackValue, 'AI_TEXT_FALLBACK_PROVIDER')
+    : undefined;
+
+  if (fallback === primary) {
+    throw new ProviderSelectionError('AI text primary and fallback providers must be different');
+  }
+
+  return { primary, fallback };
+}
+
+function createAdapter(
+  provider: ProviderType,
+  environment: ProviderEnvironment
+): AIProviderAdapter | undefined {
+  switch (provider) {
+    case 'logicc': {
+      const apiKey = environment.LOGICC_API_KEY;
+      return apiKey
+        ? new LogiccAdapter({
+            apiKey,
+            endpointUrl: environment.LOGICC_ENDPOINT_URL,
+            defaultModel: environment.LOGICC_MODEL,
+          })
+        : undefined;
+    }
+    case 'langdock': {
+      const apiKey = environment.LANGDOCK_API_KEY ?? environment.LANGDOCK_API_CODE;
+      return apiKey
+        ? new LangdockAdapter({
+            apiKey,
+            endpointUrl: environment.LANGDOCK_ENDPOINT_URL,
+            defaultModel: environment.LANGDOCK_MODEL ?? environment.MODEL,
+          })
+        : undefined;
+    }
+    case 'openai': {
+      const apiKey = environment.OPENAI_API_KEY;
+      return apiKey
+        ? new OpenAIAdapter({
+            apiKey,
+            baseUrl: environment.OPENAI_BASE_URL,
+            defaultModel: environment.OPENAI_MODEL,
+          })
+        : undefined;
+    }
+  }
 }
 
 export class AIProviderFactory {
   private static instance: AIProviderFactory;
-  private adapters: Map<string, AIProviderAdapter> = new Map();
+  private readonly adapters = new Map<string, AIProviderAdapter>();
 
   public static getInstance(): AIProviderFactory {
     if (!AIProviderFactory.instance) {
@@ -26,47 +100,53 @@ export class AIProviderFactory {
     this.adapters.set(adapter.providerName.toLowerCase(), adapter);
   }
 
-  public getAdapter(providerName: ProviderType | string): AIProviderAdapter {
-    const key = providerName.toLowerCase();
-    const adapter = this.adapters.get(key);
+  public clear(): void {
+    this.adapters.clear();
+  }
 
+  public hasAdapter(providerName: ProviderType | string): boolean {
+    return this.adapters.has(providerName.toLowerCase());
+  }
+
+  public getOptionalAdapter(providerName: ProviderType | string): AIProviderAdapter | undefined {
+    return this.adapters.get(providerName.toLowerCase());
+  }
+
+  public getAdapter(providerName: ProviderType | string): AIProviderAdapter {
+    const adapter = this.getOptionalAdapter(providerName);
     if (!adapter) {
       throw new Error(`AI Provider Adapter '${providerName}' is not registered.`);
     }
-
     return adapter;
   }
 
-  public initializeFromEnv(): void {
-    const langdockKey = process.env.LANGDOCK_API_CODE;
-    if (langdockKey) {
-      this.registerAdapter(
-        new LangdockAdapter({
-          apiKey: langdockKey,
-          endpointUrl: process.env.LANGDOCK_ENDPOINT_URL,
-          defaultModel: process.env.MODEL || 'gpt-5.2',
-        })
-      );
+  public listRegisteredProviders(): readonly string[] {
+    return [...this.adapters.keys()].sort();
+  }
+
+  /**
+   * Registers only the explicitly selected providers.
+   *
+   * Credentials for unnamed providers are intentionally ignored. A selected
+   * provider with a missing credential remains unregistered so orchestration
+   * can fail closed with `no_provider_configured`.
+   */
+  public initializeFromEnv(environment: ProviderEnvironment = process.env): ProviderSelection {
+    this.clear();
+    const selection = parseProviderSelection(environment);
+    const selectedProviders: ProviderType[] = [selection.primary];
+    if (selection.fallback) {
+      selectedProviders.push(selection.fallback);
     }
 
-    const mastraKey = process.env.GATEWAY_API_MASTRA_KEY;
-    if (mastraKey) {
-      this.registerAdapter(
-        new MastraAdapter({
-          apiKey: mastraKey,
-          gatewayUrl: process.env.GATEWAY_API_URL,
-        })
-      );
+    for (const provider of selectedProviders) {
+      const adapter = createAdapter(provider, environment);
+      if (adapter) {
+        this.registerAdapter(adapter);
+      }
     }
 
-    const openAIKey = process.env.OPENAI_API_KEY;
-    if (openAIKey) {
-      this.registerAdapter(
-        new OpenAIAdapter({
-          apiKey: openAIKey,
-        })
-      );
-    }
+    return selection;
   }
 }
 

@@ -13,10 +13,14 @@ Every production environment deployment requires the following variables to be e
 | `NEXT_PUBLIC_SUPABASE_URL` | Production Supabase Project URL | Publicly accessible in browser. |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Production Supabase Anonymous Key | Publicly accessible in browser. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Production Supabase Service Role Key | **SECRET**. Server-side only. Must NEVER leak to client-side bundles. |
-| `LANGDOCK_API_CODE` | Production Langdock Integration API Key | **SECRET**. Server-side only. |
+| `AI_TEXT_PRIMARY_PROVIDER` | Explicit primary provider (`logicc`) | Server-side routing control. |
+| `AI_TEXT_FALLBACK_PROVIDER` | Explicit fallback provider (`langdock`) | Server-side routing control. |
+| `LOGICC_API_KEY` | Production Logicc API key | **SECRET**. Server-side only. |
+| `LOGICC_ENDPOINT_URL` | `https://api.logicc.io/v1` unless vendor configuration differs | Server-side only. |
+| `LOGICC_MODEL` | Approved Logicc model identifier | Server-side only. |
+| `LANGDOCK_API_KEY` | Production Langdock API key | **SECRET**. Server-side only. |
 | `LANGDOCK_ENDPOINT_URL` | Production Langdock Endpoint URL | Server-side only. |
-| `GATEWAY_API_MASTRA_KEY` | Production Mastra Orchestrator API Key | **SECRET**. Server-side only. |
-| `GATEWAY_API_URL` | Production Mastra Endpoint URL | Server-side only. |
+| `LANGDOCK_MODEL` | Approved Langdock fallback model identifier | Server-side only. |
 
 ---
 
@@ -26,6 +30,13 @@ To prevent exposing database secrets or service keys:
 1. **Prefix Rule**: Only variables prefixed with `NEXT_PUBLIC_` are bundled into browser-side client bundles by Next.js.
 2. **Admin Client Restrictions**: The `SUPABASE_SERVICE_ROLE_KEY` is a secret credential bypassing all PostgreSQL RLS policies. It must **never** be defined under client-side execution.
 3. **Execution Guard**: `createAdminSupabaseClient` in `@tugpt/database` explicitly asserts `typeof window === 'undefined'` to block instantiation if imported or run inside client bundles.
+4. **Explicit AI Routing**: Provider eligibility is determined only by
+   `AI_TEXT_PRIMARY_PROVIDER` and `AI_TEXT_FALLBACK_PROVIDER`; unused credentials
+   do not silently activate a provider. Mastra runs as the orchestration runtime
+   and is not configured as an inference provider.
+5. **Durable Orchestration**: Production must pass a persistent Mastra storage
+   adapter when constructing `@tugpt/ai-orchestration`. The package rejects a
+   missing adapter instead of falling back to in-memory workflow state.
 
 ---
 

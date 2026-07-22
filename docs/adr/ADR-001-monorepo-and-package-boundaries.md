@@ -15,7 +15,10 @@ TuGPT.ai is a multi-service SaaS platform encompassing web applications, auth se
    - `@tugpt/auth`: Authentication operations, OAuth flows, session management, and tenant context resolution.
    - `@tugpt/security`: RLS policy contracts and local policy evaluator logic.
    - `@tugpt/observability`: Structured JSON logger and performance/latency metrics collector.
-   - `@tugpt/ai-providers`: Standardized provider adapter interfaces for OpenAI, Langdock, Mastra, and custom LLM routing.
+   - `@tugpt/ai-providers`: Thin inference-provider transports for Logicc,
+     Langdock, and explicitly selected alternatives.
+   - `@tugpt/ai-orchestration`: Mastra workflows, explicit provider routing,
+     bounded timeouts, fallback, and normalized completion outcomes.
    - `@tugpt/feature-flags`: Feature flag evaluation service supporting global and tenant-level flag resolution.
    - `@tugpt/jobs`: Background task queue abstraction adapters.
 3. Lockfile policy: Single root `pnpm-lock.yaml` is authoritative. No lockfiles allowed inside apps/ or packages/.

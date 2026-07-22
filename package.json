@@ -1,6 +1,9 @@
 {
   "name": "tugpt-monorepo",
   "private": true,
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
     "build": "turbo build",
