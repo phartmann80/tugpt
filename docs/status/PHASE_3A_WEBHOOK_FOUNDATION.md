@@ -23,19 +23,20 @@ backend, per the authorized scope.
 
 All commands were force-executed, not served from Turbo cache.
 
-## pgTAP: structurally inspected, execution pending
+## pgTAP: executed in isolated CI
 
-This sandbox has no Docker access. The new suite was not executed here.
+GitHub Actions run
+[#10](https://github.com/phartmann80/tugpt/actions/runs/29964287534)
+started a clean local Supabase database, applied both migrations, and ran
+all database suites successfully.
 
 ```text
-File: supabase/tests/database/webhook_foundation_rls.test.sql
-plan(47), 47 assertions counted -- matches exactly
-
-Existing suites, unmodified by this PR:
-supabase/tests/database/invitations_and_ownership.test.sql -- plan(10), 10 assertions
-supabase/tests/database/rls_adversarial.test.sql -- plan(35), 35 assertions
-
-Combined total after this PR: 92 pgTAP assertions across 3 files.
+supabase/tests/database/invitations_and_ownership.test.sql .. ok (10)
+supabase/tests/database/rls_adversarial.test.sql ............ ok (35)
+supabase/tests/database/webhook_foundation_rls.test.sql ..... ok (47)
+All tests successful.
+Files=3, Tests=92
+Result: PASS
 ```
 
 ## Coverage of the new suite
@@ -48,7 +49,7 @@ conversation escalation-state preservation; idempotent worker redelivery;
 client-visible tenant isolation; atomic dead-letter persistence/archive; and
 rejection of tampered cross-tenant staging identity.
 
-## Commands for Paul's Windows machine
+## Optional local reproduction
 
 ```powershell
 git fetch origin
@@ -59,15 +60,11 @@ pnpm exec supabase db reset
 pnpm exec supabase test db
 ```
 
-Do not claim this passes until Paul reports the actual `db reset` and
-`test db` output from that run.
-
 ## Not performed in this PR
 
 AI draft generation, live provider calls, outbound WhatsApp sending,
 dashboard UI, subscriptions/billing, ai_usage_events, a real secrets
-backend, deployment, production Supabase changes, merge into main, or
-tag creation.
+backend, deployment, or production Supabase changes.
 
 ## Findings during this PR (not requested, reported for transparency)
 
