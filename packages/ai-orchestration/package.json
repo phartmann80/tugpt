@@ -1,5 +1,5 @@
 {
-  "name": "@tugpt/ai-providers",
+  "name": "@tugpt/ai-orchestration",
   "version": "0.1.0",
   "private": true,
   "main": "./src/index.ts",
@@ -10,7 +10,9 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@tugpt/observability": "workspace:*"
+    "@mastra/core": "1.51.0",
+    "@tugpt/ai-providers": "workspace:*",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@types/node": "^20",

@@ -6,7 +6,7 @@
  * This interface currently exposes only `generateCompletion` and covers
  * synchronous chat completion alone. It intentionally does NOT yet define
  * streaming, structured output, tool calls, embeddings, image/video
- * generation, speech-to-text/text-to-speech, cancellation, retry policy, or
+ * generation, speech-to-text/text-to-speech, retry policy, or durable
  * usage/cost reporting. Those capabilities require a dedicated
  * capability-based architecture review before this contract is expanded.
  *
@@ -26,7 +26,7 @@ export interface CompletionOptions {
   readonly organizationId?: string;
   readonly requestId?: string;
   /**
-   * Real cancellation (Phase 3A, see ADR-006 item 5 and ADR-011). Adapters
+   * Real cancellation (see ADR-006 item 5 and ADR-011). Adapters
    * that perform a network call MUST forward this signal to the underlying
    * transport so an orchestration-level timeout or shutdown actually
    * cancels the in-flight request. Optional so existing adapter
@@ -54,8 +54,8 @@ export interface AIProviderAdapter {
   
   /**
    * Generates a text completion based on standard ChatMessages.
-   * The sole capability currently implemented (see ADR-006). Live production
-   * calls to external providers remain disabled until Phase 3 authorization.
+   * The sole capability currently implemented (see ADR-006). Provider
+   * selection and fallback belong to the orchestration layer, never here.
    */
   generateCompletion(
     messages: readonly ChatMessage[],

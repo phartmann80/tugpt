@@ -1,7 +1,7 @@
 # ADR-011: Orchestration Runtime and Provider Selection
 
 ## Status
-Provisional (depends on ADR-006; both remain provisional together)
+Accepted for synchronous text-completion routing
 
 ## Context
 Phase 2 established a thin `AIProviderAdapter` contract (ADR-006) covering only
@@ -10,9 +10,9 @@ decide which provider handles a given request, how failures are handled, and
 how usage is recorded -- without collapsing that decision-making into the
 adapters themselves.
 
-TuGPT.ai has three provider integrations planned: **Logicc** (primary
-inference candidate), **Langdock** (explicit fallback only), and legacy
-adapters for **OpenAI** and **Mastra**-as-adapter that predate this ADR.
+TuGPT.ai has three inference-provider integrations: **Logicc** (primary),
+**Langdock** (explicit fallback only), and **OpenAI** (available only when
+explicitly selected). A legacy Mastra-as-adapter implementation predated this ADR.
 Provider selection must never be inferred from which credentials happen to be
 present in the environment -- that has previously caused ambiguous, silent
 routing decisions and is explicitly disallowed here.
@@ -25,10 +25,8 @@ routing decisions and is explicitly disallowed here.
    This ADR corrects that: Mastra is the layer that assembles prompts, threads
    conversation state, decides whether a tool/function call is needed, and
    selects which underlying inference adapter actually executes a completion.
-   The existing `MastraAdapter` class name is misleading under this model and
-   should be renamed/repurposed in a later Phase 3 slice (not in Phase 3A) to
-   reflect "Mastra orchestration client" rather than "Mastra as one of three
-   interchangeable providers." No renaming is performed in Phase 3A.
+   Phase 3B removes the legacy `MastraAdapter` and registers the routing workflow
+   in `@mastra/core`. Mastra therefore cannot be selected as an inference provider.
 
 2. **Explicit provider selection, never credential-presence-based.**
    Two environment variables are authoritative:
@@ -45,11 +43,10 @@ routing decisions and is explicitly disallowed here.
    `no_provider_configured` normalized error (see item 6) rather than silently
    trying an unnamed provider.
 
-3. **Logicc is the primary provider candidate.** A `LogiccAdapter` will
-   implement the existing `AIProviderAdapter.generateCompletion()` interface
-   (added in a later Phase 3 slice; ADR-006's contract is unchanged by this
-   requirement). No live Logicc calls or credentials are introduced by this
-   ADR or by Phase 3A.
+3. **Logicc is the primary provider.** `LogiccAdapter` implements the existing
+   `AIProviderAdapter.generateCompletion()` interface against Logicc's documented
+   OpenAI-compatible Chat Completions endpoint. Tests use an injected transport;
+   no live credential is required by the implementation or CI.
 
 4. **Langdock is fallback-only, and only when explicitly configured.**
    `LangdockAdapter` is only invoked by the orchestration runtime when
@@ -60,7 +57,7 @@ routing decisions and is explicitly disallowed here.
    `OpenAIAdapter` remains in the codebase (ADR-006 already covers it as an
    implemented adapter) but is only reachable if a future configuration
    explicitly names `openai` in one of the two selection variables above --
-   which is not the current configuration and is not enabled by Phase 3A.
+   which is not the current default configuration.
 
 6. **Timeout, cancellation, and failure normalization.** The orchestration
    runtime wraps every `generateCompletion` call with an explicit,
@@ -72,27 +69,25 @@ routing decisions and is explicitly disallowed here.
    provider SDK exception type is ever allowed to propagate past the
    orchestration boundary.
 
-7. **Usage metadata.** Every attempted completion call (successful or not)
-   is expected to produce a usage/metadata record (provider used, model,
-   token counts, latency, outcome) for later metering. The concrete
-   `ai_usage_events` table is explicitly deferred past Phase 3A (see the
-   Phase 3A implementation evidence) -- this ADR fixes the *requirement*,
-   not the schema, which will be introduced in the slice that actually wires
-   a live provider call.
+7. **Usage metadata.** Every attempted completion produces bounded attempt
+   metadata (provider, model, latency, outcome, normalized error, and token usage
+   when available). Adapters also emit the existing observability metric. Durable
+   `ai_usage_events` persistence is required in the worker integration slice
+   before production traffic is enabled.
+
+8. **Durable runtime state is mandatory.** Runtime construction requires a
+   Mastra storage adapter. Tests inject Mastra's in-memory test store; production
+   code cannot silently accept Mastra's non-durable default.
 
 ## Consequences
 - Provider selection is auditable and reproducible from two environment
   variables alone -- no hidden precedence rules based on which secrets exist.
-- Adding Logicc does not require touching the adapter interface; it is a
-  new implementation of the existing thin contract.
-- Mastra's role is now unambiguous: orchestration, not transport. Any code
-  that currently treats `MastraAdapter` as a peer of `OpenAIAdapter` /
-  `LangdockAdapter` for the purpose of *selection* is now understood to be
-  legacy and will be revisited when Mastra orchestration is actually wired
-  in (not part of Phase 3A, which introduces no live provider calls at all).
+- Logicc uses the existing thin adapter contract without expanding it.
+- Mastra's role is unambiguous: orchestration, not transport. The legacy
+  `MastraAdapter` has been removed.
 
 ## Security Implications
-- No credentials are read, validated, or exercised by this ADR or by
-  Phase 3A. The explicit-configuration requirement is itself a security
-  control: it prevents an operator from accidentally activating a fallback
-  provider merely by having its API key present in `.env`.
+- The explicit-configuration requirement prevents an operator from accidentally
+  activating a provider merely by placing its API key in the environment.
+- Provider credentials stay inside server-only adapter instances and are never
+  included in workflow input, output, attempt metadata, or error messages.
